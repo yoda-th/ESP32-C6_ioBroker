@@ -4,7 +4,7 @@
 #include "logger.h"
 #include "time_module.h"
 #include "valve_module.h"
-#include "flow_module.h"    // V0.9 CHANGE: für A5 – Anomalieprüfung
+#include "flow_module.h"    // V0.9 CHANGE: für Anomalieprüfung
 #include <time.h>
 
 static IrrigationProgram prog;
@@ -13,9 +13,8 @@ static IrrigationMode mode = IrrigationMode::AUTO;
 static bool running = false;
 static time_t runStart_t = 0;
 static int lastRunDay = -1;  // tm_yday
-static time_t lastRunEnd_t = 0; // V0.9 CHANGE: letztes Ende für Logging
 
-// V0.9 CHANGE: Hilfsfunktion für Zeitformat in Logs (A4)
+// V0.9 CHANGE: Hilfsfunktion für Zeitformat in Logs
 static String fmtTime(const struct tm &tmv) {
     char buf[16];
     snprintf(buf, sizeof(buf), "%02d:%02d:%02d", tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
@@ -31,7 +30,6 @@ void irrigationInit() {
 
     running = false;
     lastRunDay = -1;
-    lastRunEnd_t = 0;
     mode = IrrigationMode::AUTO;
 
     logInfo("Irrigation default: enabled=" + String(prog.enabled) +
@@ -72,7 +70,7 @@ uint32_t irrigationGetRemainingSec() {
 void irrigationLoop() {
     if (!timeIsValid()) return;
     if (mode != IrrigationMode::AUTO) {
-        // V0.9 CHANGE: einfache Anomalieprüfung auch in MANUAL sinnvoll (A5)
+        // V0.9 CHANGE: einfache Anomalieprüfung auch in MANUAL sinnvoll
         if (valveGetState() == ValveState::CLOSED && flowGetLpm() > 0.2f) {
             logWarn("V0.9: Anomaly: Flow detected while valve CLOSED (MANUAL mode)");
         }
@@ -83,28 +81,23 @@ void irrigationLoop() {
     struct tm now_tm;
     localtime_r(&t, &now_tm);
 
-    // neuer Tag → neuer Programmlauf möglich
-    if (lastRunDay != now_tm.tm_yday && !running) {
-        // no-op
-    }
-
     if (!running && prog.enabled) {
-        if (lastRunDay != now_tm.tm_yday) {
-            if (now_tm.tm_hour == prog.startHour &&
-                now_tm.tm_min == prog.startMinute) {
-                // V0.9 CHANGE (A3): robustere Behandlung, falls Ventil bereits OPEN ist
-                if (valveGetState() == ValveState::OPEN) {
-                    logWarn("V0.9: AUTO start while valve already OPEN – continuing as AUTO run");
-                } else {
-                    valveSet(ValveState::OPEN);
-                }
+        if (lastRunDay != now_tm.tm_yday &&
+            now_tm.tm_hour == prog.startHour &&
+            now_tm.tm_min == prog.startMinute) {
 
-                running = true;
-                runStart_t = t;
-                lastRunDay = now_tm.tm_yday;
-
-                logInfo("Irrigation AUTO start at " + fmtTime(now_tm));
+            // V0.9 CHANGE: robustere Behandlung, falls Ventil bereits OPEN ist
+            if (valveGetState() == ValveState::OPEN) {
+                logWarn("V0.9: AUTO start while valve already OPEN – continuing as AUTO run");
+            } else {
+                valveSet(ValveState::OPEN);
             }
+
+            running = true;
+            runStart_t = t;
+            lastRunDay = now_tm.tm_yday;
+
+            logInfo("Irrigation AUTO start at " + fmtTime(now_tm));
         }
     }
 
@@ -112,23 +105,19 @@ void irrigationLoop() {
         uint32_t elapsed = (uint32_t)difftime(t, runStart_t);
 
         if (elapsed >= prog.durationSec) {
-            valveSet(ValveState::CLOSED);
-            running = false;
-            lastRunEnd_t = t;
-
             logInfo("Irrigation AUTO stop (program duration reached), elapsed=" +
                     String(elapsed) + "s");
-        } else if (elapsed >= prog.maxRunSec) {
             valveSet(ValveState::CLOSED);
             running = false;
-            lastRunEnd_t = t;
-
+        } else if (elapsed >= prog.maxRunSec) {
             logWarn("Irrigation AUTO stop (maxRunSec safety), elapsed=" +
                     String(elapsed) + "s");
+            valveSet(ValveState::CLOSED);
+            running = false;
         }
     }
 
-    // V0.9 CHANGE (A5): Anomalieprüfung – Flow bei geschlossenem Ventil
+    // V0.9 CHANGE: Anomalieprüfung – Flow bei geschlossenem Ventil
     if (!running && valveGetState() == ValveState::CLOSED && flowGetLpm() > 0.2f) {
         logWarn("V0.9: Anomaly: Flow detected while valve CLOSED (AUTO idle)");
     }

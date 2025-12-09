@@ -3,11 +3,11 @@
 #include "config.h"
 #include "logger.h"
 
-// Beispiel-Spannungsteiler R1 (oben) / R2 (unten)
+// Beispiel-Spannungsteiler R1 (oben) / R2 (unten) auf 3.3V
 static const float ADC_REF     = 3.3f;
 static const int   ADC_MAX     = 4095;
-static const float R1_kOhm     = 51.0f;
-static const float R2_kOhm     = 10.0f;
+static const float R1_kOhm     = 51.0f;  // oben
+static const float R2_kOhm     = 10.0f;  // unten
 
 static float lastVoltage = 0.0f;
 static unsigned long lastReadMs = 0;
@@ -20,7 +20,7 @@ void batteryInit() {
 
 void batteryLoop() {
     unsigned long now = millis();
-    if (now - lastReadMs >= 5000) {
+    if (now - lastReadMs >= 5000) { // alle 5s
         int raw = analogRead(PIN_BATTERY_ADC);
 
         // V0.9 CHANGE: Clamping des ADC-Rohwerts, um Ausreißer abzufangen
@@ -33,7 +33,6 @@ void batteryLoop() {
         float u_adc = (float)raw * ADC_REF / (float)ADC_MAX;
         float factor = (R1_kOhm + R2_kOhm) / R2_kOhm;
         lastVoltage = u_adc * factor;
-
         lastReadMs = now;
     }
 }

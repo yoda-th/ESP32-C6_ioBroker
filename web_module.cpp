@@ -41,7 +41,7 @@ static String buildStatusJson() {
     json += "\"flow_lpm\":" + String(flowGetLpm(), 2) + ",";
     json += "\"flow_total_l\":" + String(flowGetTotalLiters(), 2) + ",";
     json += "\"battery_v\":" + String(batteryGetVoltage(), 2) + ",";
-    // V0.9 CHANGE (E1): Irrigation-Infos ergänzen
+    // V0.9 CHANGE: Irrigation-Infos ergänzen
     json += "\"irr_mode\":\"" + String(irrigationGetMode() == IrrigationMode::AUTO ? "AUTO" : "MANUAL") + "\",";
     json += "\"irr_running\":" + String(irrigationIsRunning() ? "true" : "false") + ",";
     json += "\"irr_start_h\":" + String(p.startHour) + ",";
@@ -53,7 +53,7 @@ static String buildStatusJson() {
 
 static void handleRoot() {
     if (!checkAuth()) return;
-    addNoCacheHeaders();              // V0.9 CHANGE (E2)
+    addNoCacheHeaders();              // V0.9 CHANGE
     String html = "<html><head><title>";
     html += DEVICE_NAME;
     html += "</title>";
@@ -98,7 +98,7 @@ static void handleValvePost() {
     if (server.hasArg("state")) {
         String s = server.arg("state");
         if (s == "open") {
-            irrigationSetMode(IrrigationMode::MANUAL); // V0.9 CHANGE: MANUAL bei direkter Bedienung
+            irrigationSetMode(IrrigationMode::MANUAL); // V0.9 CHANGE
             valveSet(ValveState::OPEN);
         } else {
             irrigationSetMode(IrrigationMode::MANUAL);
@@ -111,14 +111,14 @@ static void handleValvePost() {
 
 static void handleApiStatus() {
     if (!checkAuth()) return;
-    addNoCacheHeaders();             // V0.9 CHANGE
+    addNoCacheHeaders();
     String json = buildStatusJson();
     server.send(200, "application/json", json);
 }
 
 static void handleUpdateGet() {
     if (!checkAuth()) return;
-    addNoCacheHeaders();             // V0.9 CHANGE
+    addNoCacheHeaders();
     String html =
         "<html><body><h1>OTA Update (" FW_VERSION ")</h1>"
         "<form method='POST' action='/update' enctype='multipart/form-data'>"

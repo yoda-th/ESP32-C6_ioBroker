@@ -2,7 +2,6 @@
 #include "flow_module.h"
 #include "config.h"
 #include "logger.h"
-#include <limits>
 
 // V0.9 CHANGE: Verbesserte Flow-Logik mit 100-ms-Fenster, Plausibilitätsfilter & Overflow-Schutz
 
@@ -13,8 +12,8 @@ static float lastLpm = 0.0f;
 static float totalLiters = 0.0f;
 static unsigned long lastCalcMs = 0;
 
-// an Sensor anpassen:
-static const float PULSES_PER_LITER = 450.0f;
+// TODO: an deinen Sensor anpassen (Impulse pro Liter):
+static const float PULSES_PER_LITER = 450.0f; //Hinweis: Das ist ein Standardwert. Je nach China-Sensor kann der variieren (oft 450, 396 oder 5880).
 
 // V0.9 CHANGE: Plausibilitätsparameter
 static const float MAX_LPM_STEP_FACTOR = 5.0f;    // max. Sprungfaktor vs. vorher

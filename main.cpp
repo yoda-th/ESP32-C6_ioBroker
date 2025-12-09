@@ -17,7 +17,7 @@ static unsigned long lastStatePublishMs = 0;
 String buildStateJson() {
     IrrigationProgram p = irrigationGetProgram();
 
-    // V0.9 CHANGE (F4): JSON konsistent mit Web-/API-Status
+    // V0.9 CHANGE: JSON konsistent mit Web-/API-Status
     String json = "{";
     json += "\"fw\":\"" + String(FW_VERSION) + "\",";
     json += "\"device\":\"" + String(DEVICE_NAME) + "\",";
@@ -55,7 +55,7 @@ void onMqttCommand(const String &cmdJson) {
 
 void setup() {
     logInit();
-    logInfo("Boot " + String(DEVICE_NAME) + " FW " + FW_VERSION); // V0.9: Version sichtbar
+    logInfo("Boot " + String(DEVICE_NAME) + " FW " + FW_VERSION);
 
     pinMode(PIN_STATUS_LED, OUTPUT);
     digitalWrite(PIN_STATUS_LED, LOW);

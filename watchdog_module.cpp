@@ -7,7 +7,7 @@
 
 #include <esp_task_wdt.h>
 
-static const int WDT_TIMEOUT_S = 10;
+static const int WDT_TIMEOUT_S = 10;   // 10s ohne Feed -> Reset
 
 void watchdogInit() {
     esp_task_wdt_init(WDT_TIMEOUT_S, true);
@@ -21,7 +21,7 @@ void watchdogFeed() {
 
 void watchdogLoop() {
     if (timeIsDailyResetTime()) {
-        // V0.9 CHANGE (D3): Kein täglicher Reset, wenn Bewässerung läuft
+        // V0.9 CHANGE: Kein täglicher Reset, wenn Bewässerung läuft
         if (irrigationIsRunning()) {
             logWarn("V0.9: Daily reset time reached but irrigation running – postponing reset");
             return;

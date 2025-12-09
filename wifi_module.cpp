@@ -11,7 +11,7 @@ static NetConfig netCfg;
 static unsigned long lastReconnectAttempt = 0;
 static unsigned long lastWifiOkMs = 0;
 static const unsigned long WIFI_RECONNECT_INTERVAL_MS = 5000;
-static const unsigned long WIFI_MAX_DOWN_MS = 5UL * 60UL * 1000UL;
+static const unsigned long WIFI_MAX_DOWN_MS = 5UL * 60UL * 1000UL; // 5 min
 
 static unsigned long reconnectCounter = 0; // V0.9 CHANGE: Reconnect-Zähler
 
@@ -43,7 +43,7 @@ void wifiLoop() {
         lastReconnectAttempt = now;
         reconnectCounter++;
 
-        // V0.9 CHANGE (D1/D2): klarere Reconnect-Logs
+        // V0.9 CHANGE: klarere Reconnect-Logs
         logWarn("WiFi disconnected, reconnect attempt #" + String(reconnectCounter));
         WiFi.disconnect(false, false);
         WiFi.mode(WIFI_STA);
