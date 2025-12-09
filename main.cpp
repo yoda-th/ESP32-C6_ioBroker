@@ -1,4 +1,5 @@
 // Firmware V0.9.0 – based on V0.8.0, modified in this version.
+//// web_module.cpp — Updated version with dynamic MQTT topic display
 #include <Arduino.h>
 #include "config.h"
 #include "logger.h"
@@ -13,6 +14,9 @@
 #include "irrigation_module.h"
 
 static unsigned long lastStatePublishMs = 0;
+unsigned long lastOpenTimestamp = 0; // Zeitstempel (Sekunden seit 1970)
+bool warningSent30h = false;
+bool warningLeak = false;
 
 String buildStateJson() {
     IrrigationProgram p = irrigationGetProgram();
@@ -73,6 +77,9 @@ void setup() {
     webInit();
     watchdogInit();
 
+    // Initialisieren
+    lastOpenTimestamp = time(NULL);
+
     logInfo("Setup done");
 }
 
@@ -89,18 +96,62 @@ void loop() {
     webLoop();
     watchdogLoop();
 
-    unsigned long now = millis();
-    if (now - lastStatePublishMs >= 5000) {
+    // --- Millisekunden-Timer für MQTT und LED ---
+    unsigned long nowMs = millis(); // Umbenannt in nowMs zur Klarheit
+
+    if (nowMs - lastStatePublishMs >= 5000) {
         String stateJson = buildStateJson();
         mqttPublishState(stateJson);
-        lastStatePublishMs = now;
+        lastStatePublishMs = nowMs;
     }
 
     static bool led = false;
     static unsigned long lastLedMs = 0;
-    if (now - lastLedMs >= 1000) {
+    if (nowMs - lastLedMs >= 1000) {
         led = !led;
         digitalWrite(PIN_STATUS_LED, led ? HIGH : LOW);
-        lastLedMs = now;
+        lastLedMs = nowMs;
+    }
+
+    // --- LOGIK-BLOCK ---
+
+    // 1. Zeitstempel aktualisieren (wenn Ventil offen)
+    if (valveGetState() == ValveState::OPEN) {
+        lastOpenTimestamp = time(NULL); // Zeit merken
+        warningSent30h = false;         // Warnung Reset
+    }
+
+    // 2. Die 30-Stunden-Prüfung (Stagnations-Alarm)
+    time_t nowEpoch = time(NULL); // FIX: Variable umbenannt (time_t vs unsigned long)
+    
+    if (nowEpoch > 10000) { // Nur wenn Zeit gültig (Systemuhr gestellt)
+        // 30 Stunden = 108000 Sekunden
+        if ((nowEpoch - lastOpenTimestamp) > 108000) {
+            if (!warningSent30h) {
+                String msg = "ALARM: Stagnation > 30h";
+                logError(msg);
+                mqttPublish(TOPIC_DIAG, msg.c_str());
+                
+                logSetLastDiag(msg); // <--- DAS IST NEU: Für Webseite speichern
+                
+                warningSent30h = true; 
+            }
+        }
+    } // <--- FIX: Diese Klammer fehlte! (Schließt "if nowEpoch > 10000")
+
+    // 3. Leckage-Schutz
+    // Wenn Ventil ZU ist, aber Flow > 0.5 L/min
+    if (valveGetState() == ValveState::CLOSED && flowGetLpm() > 0.5) {
+        if (!warningLeak) {
+            String msg = "ALARM: LEAK DETECTED!";
+            logError(msg);
+            mqttPublish(TOPIC_DIAG, msg.c_str());
+            
+            logSetLastDiag(msg); // <--- DAS IST NEU: Für Webseite speichern
+            
+            warningLeak = true;
+        }
+    } else {
+        warningLeak = false;
     }
 }

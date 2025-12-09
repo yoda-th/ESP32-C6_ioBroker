@@ -1,9 +1,10 @@
 // Firmware V0.9.0 – based on V0.8.0, modified in this version.
 //V0.9.7 MQTT Topics angepasst auf bestehende ioBroker ID
+// web_module.cpp — Updated version with dynamic MQTT topic display
 #pragma once
 
 // ========= Firmware / Device =========
-#define FW_VERSION      "0.9.7-C6"
+#define FW_VERSION      "0.9.9-C6"
 #define DEVICE_NAME     "ESP-Valve-C6-01"
 #define MQTT_CLIENT_ID  "esp-valve-c6-01"
 
@@ -22,16 +23,30 @@
 #define MQTT_HOST_DEFAULT   "192.168.1.61"  // Raspi / Mosquitto / ioBroker
 #define MQTT_PORT           1883
 
-// ========= MQTT Topics =========
+// ========= MQTT Konfiguration =========
 #define MQTT_BASE_TOPIC "garden/valve1"
-//#define TOPIC_STATE     MQTT_BASE_TOPIC "/state"
-#define TOPIC_STATE     MQTT_BASE_TOPIC "/stat"
-//#define TOPIC_CMD       MQTT_BASE_TOPIC "/cmd"
-#define TOPIC_CMD       MQTT_BASE_TOPIC "/cmnd"
-#define TOPIC_CFG       MQTT_BASE_TOPIC "/cfg"
-#define TOPIC_DIAG      MQTT_BASE_TOPIC "/diag"
-#define TOPIC_PROG      MQTT_BASE_TOPIC "/prog"   // Bewässerungsprogramm-Konfig
-#define TOPIC_LWT       MQTT_BASE_TOPIC "/lwt"
+
+// ==========================================================
+// DIE MASTER-LISTE (X-Macro)
+// Hier definieren Sie alle Topics EINMALIG.
+// Syntax: X(Name_im_Code,  Endung_im_MQTT,  Anzeige_Webseite)
+// ==========================================================
+#define MQTT_TOPIC_GENERATOR(X) \
+    X(STATE, "/stat", "Status")   \
+    X(CMD,   "/cmnd", "Command")  \
+    X(CFG,   "/cfg",  "Config")   \
+    X(DIAG,  "/diag", "Diagnose") \
+    X(PROG,  "/prog", "Program")  \
+    X(LWT,   "/lwt",  "LWT")      \
+    X(WETTER, "/wetter", "Wetterbericht")
+
+// --- AB HIER PASSIERT DIE MAGIE AUTOMATISCH (NICHT ÄNDERN) ---
+
+// 1. Automatische Erzeugung der Variablen (z.B. TOPIC_CMD)
+// Der Compiler baut daraus: static const char* TOPIC_CMD = "garden/valve1/cmnd";
+#define GENERATE_VAR(name, path, label)  static const char* TOPIC_##name = MQTT_BASE_TOPIC path;
+
+MQTT_TOPIC_GENERATOR(GENERATE_VAR)
 
 // ========= OTA Web-Login =========
 #define OTA_USER        "otauser"

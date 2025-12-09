@@ -101,3 +101,8 @@ void mqttPublishCfgRequest() {
     if (!mqttClient.connected()) return;
     mqttClient.publish(TOPIC_CFG, "{\"request\":\"cfg\"}", false);
 }
+void mqttPublish(const char* topic, const char* payload) {
+    if (mqttClient.connected()) {
+        mqttClient.publish(topic, payload);
+    }
+}

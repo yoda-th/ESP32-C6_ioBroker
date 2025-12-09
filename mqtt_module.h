@@ -10,3 +10,5 @@ void mqttSetCommandCallback(MqttCommandCallback cb);
 void mqttPublishState(const String &json);
 void mqttPublishDiag(const String &json);
 void mqttPublishCfgRequest();
+// === NEU: Diese Zeile hinzufügen ===
+void mqttPublish(const char* topic, const char* payload);
