@@ -2,7 +2,7 @@
 #pragma once
 
 // ========= Firmware / Device =========
-#define FW_VERSION      "0.9.1-C6"
+#define FW_VERSION      "0.9.6-C6"
 #define DEVICE_NAME     "ESP-Valve-C6-01"
 #define MQTT_CLIENT_ID  "esp-valve-c6-01"
 

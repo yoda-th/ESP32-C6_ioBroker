@@ -1,18 +1,26 @@
-// Firmware V0.9.0 – based on V0.8.0, modified in this version.
 #include "watchdog_module.h"
 #include "time_module.h"
 #include "logger.h"
 #include "valve_module.h"
-#include "irrigation_module.h"   // V0.9 CHANGE: um laufende Bewässerung zu berücksichtigen
-
+#include "irrigation_module.h"
 #include <esp_task_wdt.h>
 
-static const int WDT_TIMEOUT_S = 10;   // 10s ohne Feed -> Reset
+// 10 Sekunden Timeout
+static const int WDT_TIMEOUT_MS = 10000;
 
 void watchdogInit() {
-    esp_task_wdt_init(WDT_TIMEOUT_S, true);
-    esp_task_wdt_add(NULL);
-    logInfo("Watchdog initialized");
+    // --- FIX FÜR ESP32-C6 (ESP-IDF v5 API) ---
+    // Statt esp_task_wdt_init(10, true) nutzen wir jetzt eine Config-Struktur
+    esp_task_wdt_config_t twdt_config = {
+        .timeout_ms = WDT_TIMEOUT_MS,
+        .idle_core_mask = (1 << 0), // Bitmaske für Core 0 (C6 hat nur Core 0)
+        .trigger_panic = true       // Reboot bei Hänger
+    };
+    
+    esp_task_wdt_init(&twdt_config);
+    esp_task_wdt_add(NULL); // Fügt den aktuellen Loop-Task zur Überwachung hinzu
+    
+    logInfo("Watchdog initialized (ESP32-C6 API)");
 }
 
 void watchdogFeed() {
@@ -20,10 +28,10 @@ void watchdogFeed() {
 }
 
 void watchdogLoop() {
+    // Täglicher Neustart-Logik
     if (timeIsDailyResetTime()) {
-        // V0.9 CHANGE: Kein täglicher Reset, wenn Bewässerung läuft
         if (irrigationIsRunning()) {
-            logWarn("V0.9: Daily reset time reached but irrigation running – postponing reset");
+            logWarn("V0.9: Daily reset postponed – irrigation running");
             return;
         }
 
