@@ -40,14 +40,26 @@ static bool mqttReconnect() {
     mqttClient.setServer(host.c_str(), MQTT_PORT);
     mqttClient.setCallback(mqttOnMessage);
 
-    if (mqttClient.connect(MQTT_CLIENT_ID)) {
+// === LWT HINZUFÜGEN ===
+    // Parameter: ID, User(null), Pass(null), WillTopic, QoS, Retain, WillMessage
+    if (mqttClient.connect(MQTT_CLIENT_ID, nullptr, nullptr, TOPIC_LWT, 1, true, "Offline")) {
+        
         logInfo("MQTT connected");
+        
+        // 1. Sofort "Online" melden (Retained = true)
+        mqttClient.publish(TOPIC_LWT, "Online", true);
+
+        // 2. Themen abonnieren
         mqttClient.subscribe(TOPIC_CMD);
         mqttClient.subscribe(TOPIC_CFG);
         mqttClient.subscribe(TOPIC_PROG);
+        
+        // 3. Config anfordern
         mqttPublishCfgRequest();
+        
         return true;
     } else {
+        // ... (Ihr bestehender Fehler-Code) ...
         logError("MQTT connect failed, rc=" + String(mqttClient.state()));
         return false;
     }

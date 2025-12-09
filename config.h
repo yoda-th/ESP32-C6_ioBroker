@@ -1,8 +1,9 @@
 // Firmware V0.9.0 – based on V0.8.0, modified in this version.
+//V0.9.7 MQTT Topics angepasst auf bestehende ioBroker ID
 #pragma once
 
 // ========= Firmware / Device =========
-#define FW_VERSION      "0.9.6-C6"
+#define FW_VERSION      "0.9.7-C6"
 #define DEVICE_NAME     "ESP-Valve-C6-01"
 #define MQTT_CLIENT_ID  "esp-valve-c6-01"
 
@@ -23,11 +24,14 @@
 
 // ========= MQTT Topics =========
 #define MQTT_BASE_TOPIC "garden/valve1"
-#define TOPIC_STATE     MQTT_BASE_TOPIC "/state"
-#define TOPIC_CMD       MQTT_BASE_TOPIC "/cmd"
+//#define TOPIC_STATE     MQTT_BASE_TOPIC "/state"
+#define TOPIC_STATE     MQTT_BASE_TOPIC "/stat"
+//#define TOPIC_CMD       MQTT_BASE_TOPIC "/cmd"
+#define TOPIC_CMD       MQTT_BASE_TOPIC "/cmnd"
 #define TOPIC_CFG       MQTT_BASE_TOPIC "/cfg"
 #define TOPIC_DIAG      MQTT_BASE_TOPIC "/diag"
 #define TOPIC_PROG      MQTT_BASE_TOPIC "/prog"   // Bewässerungsprogramm-Konfig
+#define TOPIC_LWT       MQTT_BASE_TOPIC "/lwt"
 
 // ========= OTA Web-Login =========
 #define OTA_USER        "otauser"
