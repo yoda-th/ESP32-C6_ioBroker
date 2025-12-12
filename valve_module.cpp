@@ -1,39 +1,47 @@
-//JB 2025-08-09 Pin set to INPUT for Valve close, Firmware upload fix, off-Watchdog
 #include "valve_module.h"
 #include "config.h"
 #include "logger.h"
 #include <esp_task_wdt.h> 
 
 static ValveState currentState = ValveState::CLOSED;
+static unsigned long dailyOpenSeconds = 0;
+static unsigned long lastCountMs = 0;
 
-// FINALE LOGIK: LOW-TRIGGER (Invertiert)
-// OPEN  -> Pin OUTPUT + LOW (0V) -> Relais AN
-// CLOSE -> Pin INPUT (Hochohmig) -> Relais AUS
-
+// DEINE SPEZIELLE HARDWARE-LOGIK (Wiederhergestellt)
 static void valveApplyHardware() {
     if (currentState == ValveState::OPEN) {
-        // VENTIL AUF: Erst Mode, dann Write (Fix für roten Fehler)
+        // Öffnen: Pin als Output treiben + LOW ziehen
         pinMode(PIN_RELAY, OUTPUT);
         digitalWrite(PIN_RELAY, LOW); 
     } else {
-        // VENTIL ZU: Pin trennen (Input Mode)
-        // Pullup verhindert "Geister-Schalten" durch Störungen
+        // Schließen: Pin hochohmig machen (Pullup)
         pinMode(PIN_RELAY, INPUT_PULLUP);
-        // digitalWrite(PIN_RELAY, HIGH); // Nicht nötig bei INPUT, aber sicher ist sicher
+        // Zur Sicherheit High schreiben, falls er doch Output wird
+        digitalWrite(PIN_RELAY, HIGH); 
     }
 }
 
 void valveInit() {
-    // START: Sicher ZU (Input Mode)
+    // Startzustand: Zu (Input Pullup)
     pinMode(PIN_RELAY, INPUT_PULLUP);
-    
     currentState = ValveState::CLOSED;
     valveApplyHardware(); 
-    
-    logInfo("Valve initialized (Low-Trigger / Clean GPIO), state=CLOSED");
+    logInfo("Valve initialized (Low-Side/Input Mode)");
 }
 
-void valveLoop() {}
+void valveLoop() {
+    unsigned long now = millis();
+    
+    // Zähler Logik
+    if (currentState == ValveState::OPEN) {
+        if (now - lastCountMs >= 1000) {
+            dailyOpenSeconds++;
+            lastCountMs = now;
+        }
+    } else {
+        lastCountMs = now; 
+    }
+}
 
 void valveSet(ValveState s) {
     if (s != currentState) {
@@ -45,17 +53,15 @@ void valveSet(ValveState s) {
 
 ValveState valveGetState() { return currentState; }
 
-void valveSafeBeforeUpdate() {
-    logWarn("Safe mode: DISABLE Watchdog for OTA & Close Valve");
-    
-    // 1. Ventil sicher schließen
-    valveSet(ValveState::CLOSED);
+unsigned long valveGetDailyOpenSec() { return dailyOpenSeconds; }
+void valveResetDailyOpenSec() { dailyOpenSeconds = 0; }
 
-    // 2. Den Watchdog für diesen Task KÜNDIGEN (De-Init)
-    // Damit darf das Update so lange dauern, wie es will.
+void valveSafeBeforeUpdate() {
+    logWarn("Safe mode: Valve CLOSE for OTA");
+    valveSet(ValveState::CLOSED);
     esp_task_wdt_delete(NULL); 
 }
 
 void valveSafeAfterUpdate() {
-    logInfo("Safe mode: valve remains CLOSED after update");
+    logInfo("Safe mode done");
 }

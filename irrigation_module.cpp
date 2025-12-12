@@ -1,124 +1,162 @@
-// Firmware V0.9.0 – based on V0.8.0, modified in this version.
 #include "irrigation_module.h"
 #include "config.h"
 #include "logger.h"
-#include "time_module.h"
 #include "valve_module.h"
-#include "flow_module.h"    // V0.9 CHANGE: für Anomalieprüfung
-#include <time.h>
+#include "flow_module.h" // Wichtig für Anomaly Check
+#include "time_module.h" 
+#include <time.h> 
+#include <Preferences.h>
 
-static IrrigationProgram prog;
-static IrrigationMode mode = IrrigationMode::AUTO;
+static IrrigationMode currentMode = IrrigationMode::AUTO;
+static bool isRunning = false;
+static unsigned long runStartTime = 0;
+static unsigned long runDuration = 0;
 
-static bool running = false;
-static time_t runStart_t = 0;
-static int lastRunDay = -1;  // tm_yday
+// DAS ARRAY: 6 Slots im RAM
+static IrrigationSlot slots[MAX_PROGRAM_SLOTS];
 
-// V0.9 CHANGE: Hilfsfunktion für Zeitformat in Logs
-static String fmtTime(const struct tm &tmv) {
-    char buf[16];
-    snprintf(buf, sizeof(buf), "%02d:%02d:%02d", tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
-    return String(buf);
-}
+static Preferences prefs; 
 
+// Initialisierung: Slots aus Flash laden
 void irrigationInit() {
-    prog.enabled     = IRR_DEFAULT_ENABLED;
-    prog.startHour   = IRR_DEFAULT_START_H;
-    prog.startMinute = IRR_DEFAULT_START_M;
-    prog.durationSec = IRR_DEFAULT_DURATION_S;
-    prog.maxRunSec   = IRR_DEFAULT_MAX_RUN_S;
+    prefs.begin("irr-slots", true); // Read-only
+    
+    // Wir versuchen, den ganzen Block zu lesen
+    size_t len = prefs.getBytes("data", slots, sizeof(slots));
+    
+    prefs.end();
 
-    running = false;
-    lastRunDay = -1;
-    mode = IrrigationMode::AUTO;
-
-    logInfo("Irrigation default: enabled=" + String(prog.enabled) +
-            " " + String(prog.startHour) + ":" + String(prog.startMinute) +
-            " dur=" + String(prog.durationSec) + "s");
-}
-
-void irrigationSetMode(IrrigationMode m) {
-    mode = m;
-    logInfo(String("Irrigation mode set to ") + (m == IrrigationMode::AUTO ? "AUTO" : "MANUAL"));
-}
-
-IrrigationMode irrigationGetMode() {
-    return mode;
-}
-
-IrrigationProgram irrigationGetProgram() {
-    return prog;
-}
-
-void irrigationSetProgram(const IrrigationProgram &p) {
-    prog = p;
-    logInfo("Irrigation program updated from config");
-}
-
-bool irrigationIsRunning() {
-    return running;
-}
-
-uint32_t irrigationGetRemainingSec() {
-    if (!running) return 0;
-    time_t now_t = time(nullptr);
-    uint32_t elapsed = (uint32_t)difftime(now_t, runStart_t);
-    if (elapsed >= prog.durationSec) return 0;
-    return prog.durationSec - elapsed;
+    // Wenn noch keine Daten da sind oder Größe falsch -> Defaults setzen
+    if (len != sizeof(slots)) {
+        logWarn("No valid slots found. Init defaults.");
+        for (int i = 0; i < MAX_PROGRAM_SLOTS; i++) {
+            slots[i].enabled = false;
+            slots[i].startHour = 6;
+            slots[i].startMinute = 0;
+            slots[i].durationSec = 600;
+            slots[i].weekDays = 127; // 127 = Alle Tage (Mo-So)
+        }
+    } else {
+        logInfo("Loaded " + String(MAX_PROGRAM_SLOTS) + " slots from Flash.");
+    }
 }
 
 void irrigationLoop() {
-    if (!timeIsValid()) return;
-    if (mode != IrrigationMode::AUTO) {
-        // V0.9 CHANGE: einfache Anomalieprüfung auch in MANUAL sinnvoll
-        if (valveGetState() == ValveState::CLOSED && flowGetLpm() > 0.2f) {
-            logWarn("V0.9: Anomaly: Flow detected while valve CLOSED (MANUAL mode)");
+    // 1. ANOMALIE CHECK (aus V0.9 übernommen)
+    // Wenn Ventil ZU ist, aber Flow > 0.2 l/min -> Alarm/Warnung
+    if (!isRunning && valveGetState() == ValveState::CLOSED && flowGetLpm() > 0.2f) {
+        // Wir loggen das nur alle paar Sekunden, um Spam zu vermeiden
+        static unsigned long lastWarn = 0;
+        if (millis() - lastWarn > 30000) {
+            logWarn("Anomaly: Flow detected while valve CLOSED!");
+            lastWarn = millis();
         }
-        return;
     }
 
-    time_t t = time(nullptr);
-    struct tm now_tm;
-    localtime_r(&t, &now_tm);
+    // 2. Manuelle Laufzeit prüfen (Auto-Stop)
+    if (isRunning) {
+        if (millis() - runStartTime >= runDuration * 1000UL) {
+            logInfo("Timer finished. Stopping.");
+            irrigationStop();
+        }
+        return; // Wenn läuft, starten wir nichts Neues
+    }
 
-    if (!running && prog.enabled) {
-        if (lastRunDay != now_tm.tm_yday &&
-            now_tm.tm_hour == prog.startHour &&
-            now_tm.tm_min == prog.startMinute) {
+    // 3. Automatik prüfen (Nur im AUTO Modus)
+    if (currentMode == IrrigationMode::AUTO) {
+        // Wir nutzen die neue time_module Logik
+        // Da time_module.h keine struct tm liefert, nutzen wir direkt time()
+        time_t now;
+        time(&now);
+        
+        // Zeit muss gültig sein (> 2020)
+        if (now > 1577836800) {
+            struct tm ti;
+            localtime_r(&now, &ti); // ti.tm_wday: 0=So, 1=Mo, ..., 6=Sa
 
-            // V0.9 CHANGE: robustere Behandlung, falls Ventil bereits OPEN ist
-            if (valveGetState() == ValveState::OPEN) {
-                logWarn("V0.9: AUTO start while valve already OPEN – continuing as AUTO run");
-            } else {
-                valveSet(ValveState::OPEN);
+            // Wir prüfen alle 6 Slots durch
+            for (int i = 0; i < MAX_PROGRAM_SLOTS; i++) {
+                
+                // Ist der Slot aktiv?
+                if (slots[i].enabled) {
+                    
+                    // Passt der Wochentag? (Bitmask Check)
+                    // Bit 0 = Sonntag, Bit 1 = Montag ...
+                    if ((slots[i].weekDays >> ti.tm_wday) & 1) {
+                        
+                        // Passt die Uhrzeit?
+                        if (ti.tm_hour == slots[i].startHour && ti.tm_min == slots[i].startMinute) {
+                            
+                            // Nur in den ersten 5 Sekunden der Minute triggern
+                            if (ti.tm_sec < 5) {
+                                logInfo("Slot " + String(i+1) + " Triggered! (Day " + String(ti.tm_wday) + ")");
+                                irrigationStart(slots[i].durationSec);
+                                delay(1000); // Debounce
+                                return; // Nur ein Start pro Loop
+                            }
+                        }
+                    }
+                }
             }
-
-            running = true;
-            runStart_t = t;
-            lastRunDay = now_tm.tm_yday;
-
-            logInfo("Irrigation AUTO start at " + fmtTime(now_tm));
         }
     }
+}
 
-    if (running) {
-        uint32_t elapsed = (uint32_t)difftime(t, runStart_t);
+void irrigationStart(int durationSec) {
+    // Safety Limit aus Config beachten
+    // Wir holen uns den Wert aus settings_module (falls Limit eingestellt)
+    // Da wir aber hier keinen Zugriff auf Settings haben (Zyklus!), nutzen wir ein Hard Limit oder Default
+    if (durationSec > 3600) durationSec = 3600; // Hard Safety Max 1h
+    
+    valveSet(ValveState::OPEN);
+    isRunning = true;
+    runDuration = durationSec;
+    runStartTime = millis();
+}
 
-        if (elapsed >= prog.durationSec) {
-            logInfo("Irrigation AUTO stop (program duration reached), elapsed=" +
-                    String(elapsed) + "s");
-            valveSet(ValveState::CLOSED);
-            running = false;
-        } else if (elapsed >= prog.maxRunSec) {
-            logWarn("Irrigation AUTO stop (maxRunSec safety), elapsed=" +
-                    String(elapsed) + "s");
-            valveSet(ValveState::CLOSED);
-            running = false;
-        }
+void irrigationStop() {
+    valveSet(ValveState::CLOSED);
+    isRunning = false;
+    currentMode = IrrigationMode::AUTO; 
+}
+
+void irrigationSetMode(IrrigationMode mode) {
+    currentMode = mode;
+}
+
+IrrigationMode irrigationGetMode() {
+    return currentMode;
+}
+
+bool irrigationIsRunning() {
+    return isRunning;
+}
+
+int irrigationGetRemainingSec() {
+    if (!isRunning) return 0;
+    unsigned long elapsed = (millis() - runStartTime) / 1000;
+    if (elapsed >= runDuration) return 0;
+    return runDuration - elapsed;
+}
+
+// === SLOT MANAGEMENT ===
+
+void irrigationGetSlots(IrrigationSlot* targetArray) {
+    // Kopiert unser internes Array in das Ziel
+    memcpy(targetArray, slots, sizeof(slots));
+}
+
+void irrigationUpdateSlot(int index, IrrigationSlot slot) {
+    if (index >= 0 && index < MAX_PROGRAM_SLOTS) {
+        slots[index] = slot;
+        // Achtung: Speichert noch nicht im Flash! Erst bei SaveToFlash()
     }
+}
 
-    // V0.9 CHANGE: Anomalieprüfung – Flow bei geschlossenem Ventil
-    if (!running && valveGetState() == ValveState::CLOSED && flowGetLpm() > 0.2f) {
-        logWarn("V0.9: Anomaly: Flow detected while valve CLOSED (AUTO idle)");
-    }
+void irrigationSaveToFlash() {
+    prefs.begin("irr-slots", false); // Read-Write
+    // Wir schreiben das ganze Array als einen Blob (effizient)
+    size_t written = prefs.putBytes("data", slots, sizeof(slots));
+    prefs.end();
+    logInfo("Saved Slots to Flash. Bytes: " + String(written));
 }

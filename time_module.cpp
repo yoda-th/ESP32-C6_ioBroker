@@ -1,73 +1,75 @@
 #include "time_module.h"
 #include "config.h"
 #include "logger.h"
-#include "wifi_module.h"
-
+#include <WiFi.h>
 #include <time.h>
 
-static bool time_ok = false;
-static unsigned long last_ntp_attempt_ms = 0;
-static bool reset_done_today = false;
+static bool timeSynced = false;
 
 void timeInit() {
-    time_ok = false;
-    reset_done_today = false;
-    last_ntp_attempt_ms = 0;
+    // 1. Zeitzone konfigurieren
+    // NTP_TZ_OFFSET_S ist in config.h definiert (7 * 3600 für Thailand)
+    configTime(NTP_TZ_OFFSET_S, 0, NTP_SERVER_1);
+    
+    // FIX FÜR RICHTIGE LOG-ZEITEN (POSIX):
+    // "UTC-07:00" bedeutet: Lokalzeit ist UTC + 7h.
+    setenv("TZ", "UTC-07:00", 1); 
+    tzset();
+
+    logInfo("Time Client init (Target: UTC+7)");
 }
 
 void timeLoop() {
-    if (!wifiIsConnected()) return;
-
-    unsigned long now = millis();
-    if (!time_ok && (now - last_ntp_attempt_ms > (NTP_RETRY_S * 1000UL))) {
-        last_ntp_attempt_ms = now;
-        logInfo("Configuring NTP time...");
-        configTime(NTP_TZ_OFFSET_S, 0, NTP_SERVER_1, nullptr, nullptr);
-        delay(500);
-
-        time_t t = time(nullptr);
-        if (t > 1700000000) { // grobe Schwelle
-            time_ok = true;
-            struct tm info;
-            localtime_r(&t, &info);
-            logInfo("Time sync ok");
-        } else {
-            logWarn("Time not valid yet");
+    static unsigned long lastCheck = 0;
+    if (millis() - lastCheck > 1000) {
+        lastCheck = millis();
+        
+        if (!timeSynced) {
+            time_t now;
+            time(&now);
+            // Wir prüfen, ob wir eine Zeit > 2020 haben (Epoch > 1577836800)
+            if (now > 1577836800) {
+                timeSynced = true;
+                struct tm timeinfo;
+                localtime_r(&now, &timeinfo);
+                char buf[64];
+                sprintf(buf, "NTP Sync Success: %02d.%02d.%04d %02d:%02d:%02d", 
+                        timeinfo.tm_mday, timeinfo.tm_mon + 1, timeinfo.tm_year + 1900,
+                        timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+                logInfo(buf);
+            }
         }
-    }
-
-    if (!time_ok) return;
-
-    time_t t = time(nullptr);
-    struct tm now_tm;
-    localtime_r(&t, &now_tm);
-
-    if (now_tm.tm_hour == 0 && now_tm.tm_min == 0) {
-        reset_done_today = false;
     }
 }
 
+String timeGetStr() {
+    time_t now;
+    time(&now);
+    if (now < 1577836800) return "--:--:--";
+    
+    struct tm timeinfo;
+    localtime_r(&now, &timeinfo);
+    char buf[16];
+    sprintf(buf, "%02d:%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+    return String(buf);
+}
+
+// === KOMPATIBILITÄTS-FUNKTIONEN (Fix für Linker Errors) ===
+
+// Wird vom Irrigation Module gebraucht
 bool timeIsValid() {
-    return time_ok;
+    return timeSynced;
 }
 
+// Wird vom Irrigation Module gebraucht, um struct tm zu holen
 void timeGetLocal(struct tm &out) {
-    time_t t = time(nullptr);
-    localtime_r(&t, &out);
+    time_t now;
+    time(&now);
+    localtime_r(&now, &out);
 }
 
+// Wird vom Watchdog Module gesucht (Legacy)
+// Wir geben hier FALSE zurück, da der Reboot jetzt zentral von main.cpp gesteuert wird.
 bool timeIsDailyResetTime() {
-    if (!time_ok) return false;
-
-    time_t t = time(nullptr);
-    struct tm now_tm;
-    localtime_r(&t, &now_tm);
-
-    if (now_tm.tm_hour == DAILY_RESET_H && now_tm.tm_min == DAILY_RESET_M) {
-        if (!reset_done_today) {
-            reset_done_today = true;
-            return true;
-        }
-    }
-    return false;
+    return false; 
 }

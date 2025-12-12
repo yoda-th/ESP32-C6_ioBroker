@@ -1,5 +1,3 @@
-// Firmware V0.9.0 – based on V0.8.0, modified in this version.
-//// web_module.cpp — Updated version with dynamic MQTT topic display
 #include <Arduino.h>
 #include "config.h"
 #include "logger.h"
@@ -12,38 +10,45 @@
 #include "time_module.h"
 #include "watchdog_module.h"
 #include "irrigation_module.h"
+#include "settings_module.h" 
+#include <time.h> 
 
 static unsigned long lastStatePublishMs = 0;
-unsigned long lastOpenTimestamp = 0; // Zeitstempel (Sekunden seit 1970)
+unsigned long lastOpenTimestamp = 0; 
 bool warningSent30h = false;
 bool warningLeak = false;
+bool limitWarningSent = false;
 
-String buildStateJson() {
-    IrrigationProgram p = irrigationGetProgram();
-
-    // V0.9 CHANGE: JSON konsistent mit Web-/API-Status
+String buildTeleJson() {
+    time_t rawTime;
+    time(&rawTime);
     String json = "{";
+    json += "\"ts\":" + String((unsigned long)rawTime) + ","; 
     json += "\"fw\":\"" + String(FW_VERSION) + "\",";
-    json += "\"device\":\"" + String(DEVICE_NAME) + "\",";
-    json += "\"wifi_ip\":\"" + wifiGetIp() + "\",";
-    json += "\"wifi_rssi\":" + String(wifiGetRssi()) + ",";
     json += "\"valve\":\"" + String(valveGetState() == ValveState::OPEN ? "OPEN" : "CLOSED") + "\",";
     json += "\"flow_lpm\":" + String(flowGetLpm(), 2) + ",";
     json += "\"flow_total_l\":" + String(flowGetTotalLiters(), 2) + ",";
     json += "\"battery_v\":" + String(batteryGetVoltage(), 2) + ",";
     json += "\"irr_mode\":\"" + String(irrigationGetMode() == IrrigationMode::AUTO ? "AUTO" : "MANUAL") + "\",";
     json += "\"irr_running\":" + String(irrigationIsRunning() ? "true" : "false") + ",";
-    json += "\"irr_remain_s\":" + String(irrigationGetRemainingSec()) + ",";
-    json += "\"irr_start_h\":" + String(p.startHour) + ",";
-    json += "\"irr_start_m\":" + String(p.startMinute) + ",";
-    json += "\"irr_dur_s\":" + String(p.durationSec);
+    json += "\"daily_open_s\":" + String(valveGetDailyOpenSec());
+    json += "}";
+    return json;
+}
+
+String buildHistoryJson(time_t timestamp) {
+    String json = "{";
+    json += "\"ts\":" + String((unsigned long)timestamp) + ","; 
+    json += "\"flow_l_min\":" + String(flowGetLpm(), 2) + ",";
+    json += "\"total_l\":" + String(flowGetTotalLiters(), 2) + ",";
+    json += "\"vbat\":" + String(batteryGetVoltage(), 2) + ",";
+    json += "\"valve\":\"" + String(valveGetState() == ValveState::OPEN ? "ON" : "OFF") + "\"";
     json += "}";
     return json;
 }
 
 void onMqttCommand(const String &cmdJson) {
     logInfo("CMD: " + cmdJson);
-
     if (cmdJson.indexOf("OPEN") >= 0) {
         irrigationSetMode(IrrigationMode::MANUAL);
         valveSet(ValveState::OPEN);
@@ -59,6 +64,7 @@ void onMqttCommand(const String &cmdJson) {
 
 void setup() {
     logInit();
+    settingsInit(); 
     logInfo("Boot " + String(DEVICE_NAME) + " FW " + FW_VERSION);
 
     pinMode(PIN_STATUS_LED, OUTPUT);
@@ -67,7 +73,7 @@ void setup() {
     valveInit();
     flowInit();
     batteryInit();
-    irrigationInit();
+    irrigationInit(); 
 
     wifiInit();
     timeInit();
@@ -77,15 +83,11 @@ void setup() {
     webInit();
     watchdogInit();
 
-    // Initialisieren
     lastOpenTimestamp = time(NULL);
-
-    logInfo("Setup done");
 }
 
 void loop() {
     watchdogFeed();
-
     wifiLoop();
     timeLoop();
     mqttLoop();
@@ -96,62 +98,107 @@ void loop() {
     webLoop();
     watchdogLoop();
 
-    // --- Millisekunden-Timer für MQTT und LED ---
-    unsigned long nowMs = millis(); // Umbenannt in nowMs zur Klarheit
+    unsigned long nowMs = millis(); 
 
-    if (nowMs - lastStatePublishMs >= 5000) {
-        String stateJson = buildStateJson();
-        mqttPublishState(stateJson);
+    // 1. DATA LOGGING
+    static unsigned long lastLogTime = 0;
+    static ValveState lastValveForLog = ValveState::CLOSED;
+    static float lastFlowTotal = 0; 
+    bool triggerLog = false;
+    
+    if (nowMs - lastLogTime >= 60000) triggerLog = true;
+    
+    ValveState currentV = valveGetState();
+    if (currentV != lastValveForLog) {
+        triggerLog = true;
+        if (currentV == ValveState::OPEN) {
+            logFlowEvent("START Valve Open");
+            mqttPublishEvent("valve_open"); // Event für ioBroker
+            lastFlowTotal = flowGetTotalLiters(); 
+        } else {
+            float delta = flowGetTotalLiters() - lastFlowTotal;
+            String msg = "STOP Valve Closed (Total: " + String(delta, 1) + " L)";
+            logFlowEvent(msg);
+            
+            String extra = "\"last_run_l\":" + String(delta, 2);
+            mqttPublishEvent("valve_close", extra); // Event für ioBroker
+        }
+        lastValveForLog = currentV;
+    }
+    
+    if (triggerLog) {
+        time_t rawTime;
+        time(&rawTime);
+        if (rawTime > 1700000000) { 
+            String histJson = buildHistoryJson(rawTime);
+            mqttLogDataPoint(histJson);
+            lastLogTime = nowMs;
+        }
+    }
+
+    // 2. LIVE STATUS
+    unsigned long teleInterval = 60000; 
+    if (valveGetState() == ValveState::OPEN || flowGetLpm() > 0.0) teleInterval = 5000;
+
+    if (nowMs - lastStatePublishMs >= teleInterval) {
+        mqttPublishState((valveGetState() == ValveState::OPEN) ? "OPEN" : "CLOSED"); 
+        String teleJson = buildTeleJson(); 
+        mqttPublish(TOPIC_TELE, teleJson.c_str());
+        mqttPublish(TOPIC_LWT, MQTT_PAYLOAD_ONLINE); 
+        mqttPublishUsage(valveGetDailyOpenSec(), settingsGetDailyLimitSec());
         lastStatePublishMs = nowMs;
     }
 
+    // 3. LED
     static bool led = false;
     static unsigned long lastLedMs = 0;
-    if (nowMs - lastLedMs >= 1000) {
+    if (nowMs - lastLedMs >= (wifiIsConnected() ? 1000 : 200)) {
         led = !led;
         digitalWrite(PIN_STATUS_LED, led ? HIGH : LOW);
         lastLedMs = nowMs;
     }
 
-    // --- LOGIK-BLOCK ---
-
-    // 1. Zeitstempel aktualisieren (wenn Ventil offen)
-    if (valveGetState() == ValveState::OPEN) {
-        lastOpenTimestamp = time(NULL); // Zeit merken
-        warningSent30h = false;         // Warnung Reset
+    // 4. TAGES-RESET
+    static int lastDay = -1; 
+    time_t rawTime = time(NULL);
+    struct tm timeInfo;
+    if (localtime_r(&rawTime, &timeInfo) && timeInfo.tm_year > (2020 - 1900)) {
+        if (lastDay == -1) lastDay = timeInfo.tm_mday; 
+        if (timeInfo.tm_mday != lastDay) {
+            logInfo("Daily Reset.");
+            valveResetDailyOpenSec();
+            limitWarningSent = false;   
+            lastDay = timeInfo.tm_mday; 
+        }
     }
 
-    // 2. Die 30-Stunden-Prüfung (Stagnations-Alarm)
-    time_t nowEpoch = time(NULL); // FIX: Variable umbenannt (time_t vs unsigned long)
-    
-    if (nowEpoch > 10000) { // Nur wenn Zeit gültig (Systemuhr gestellt)
-        // 30 Stunden = 108000 Sekunden
-        if ((nowEpoch - lastOpenTimestamp) > 108000) {
-            if (!warningSent30h) {
-                String msg = "ALARM: Stagnation > 30h";
-                logError(msg);
-                mqttPublish(TOPIC_DIAG, msg.c_str());
-                
-                logSetLastDiag(msg); // <--- DAS IST NEU: Für Webseite speichern
-                
-                warningSent30h = true; 
+    // 5. SAFETY
+    if (valveGetDailyOpenSec() > (unsigned long)settingsGetDailyLimitSec()) {
+        if (valveGetState() == ValveState::OPEN) {
+            logError("FAILSAFE: Limit Exceeded");
+            valveSet(ValveState::CLOSED);
+            irrigationSetMode(IrrigationMode::MANUAL);
+            if (!limitWarningSent) {
+                mqttPublishEvent("alarm_limit");
+                limitWarningSent = true;
             }
         }
-    } // <--- FIX: Diese Klammer fehlte! (Schließt "if nowEpoch > 10000")
+    }
 
-    // 3. Leckage-Schutz
-    // Wenn Ventil ZU ist, aber Flow > 0.5 L/min
-    if (valveGetState() == ValveState::CLOSED && flowGetLpm() > 0.5) {
-        if (!warningLeak) {
-            String msg = "ALARM: LEAK DETECTED!";
-            logError(msg);
-            mqttPublish(TOPIC_DIAG, msg.c_str());
-            
-            logSetLastDiag(msg); // <--- DAS IST NEU: Für Webseite speichern
-            
-            warningLeak = true;
+    // Auto Reboot (Safe)
+    static int lastCheckHour = -1;
+    if (rawTime > 1700000000) {
+        struct tm* ti = localtime(&rawTime);
+        if (ti->tm_hour != lastCheckHour) {
+            lastCheckHour = ti->tm_hour;
+            int rebootH = settingsGetRebootHour();
+            if (rebootH >= 0 && ti->tm_hour == rebootH) {
+                if (valveGetState() == ValveState::CLOSED) {
+                    logWarn("Auto-Reboot Triggered");
+                    mqttPublishEvent("reboot_scheduled");
+                    mqttGracefulRestart();
+                }
+            }
         }
-    } else {
-        warningLeak = false;
     }
 }

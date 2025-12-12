@@ -1,42 +1,65 @@
-// Firmware V0.9.0 – based on V0.8.0, modified in this version.
 #include "battery_module.h"
 #include "config.h"
 #include "logger.h"
+#include "mqtt_module.h"     
+#include "settings_module.h" 
 
-// Beispiel-Spannungsteiler R1 (oben) / R2 (unten) auf 3.3V
-static const float ADC_REF     = 3.3f;
-static const int   ADC_MAX     = 4095;
-static const float R1_kOhm     = 51.0f;  // oben
-static const float R2_kOhm     = 10.0f;  // unten
-
-static float lastVoltage = 0.0f;
-static unsigned long lastReadMs = 0;
+static float currentVoltage = 0.0;
+static float currentRawVoltage = 0.0; // NEU: Speicher für Rohwert
+static unsigned long lastMeasure = 0;
+static bool lowBatWarningSent = false;
 
 void batteryInit() {
-    analogReadResolution(12);
     pinMode(PIN_BATTERY_ADC, INPUT);
-    logInfo("Battery measurement initialized");
+    analogSetAttenuation(ADC_11db); 
+    batteryLoop(); 
 }
 
 void batteryLoop() {
     unsigned long now = millis();
-    if (now - lastReadMs >= 5000) { // alle 5s
-        int raw = analogRead(PIN_BATTERY_ADC);
+    
+    // Messung alle 5 Sekunden (zum Testen), später 60s
+    if (now - lastMeasure > 5000 || lastMeasure == 0) {
+        lastMeasure = now;
+        
+        // 1. Raw Spannung am Pin messen
+        uint32_t pinMv = analogReadMilliVolts(PIN_BATTERY_ADC);
+        float pinVoltage = pinMv / 1000.0;
+        
+        // Rohwert speichern für Telemetrie
+        currentRawVoltage = pinVoltage; 
 
-        // V0.9 CHANGE: Clamping des ADC-Rohwerts, um Ausreißer abzufangen
-        if (raw < 0) {
-            raw = 0;
-        } else if (raw > ADC_MAX) {
-            raw = ADC_MAX;
+        // 2. Faktor anwenden
+        float factor = settingsGetBatFactor(); 
+        float voltage = pinVoltage * factor; 
+        
+        // Glätten
+        if (currentVoltage == 0) currentVoltage = voltage;
+        else currentVoltage = (currentVoltage * 0.8) + (voltage * 0.2);
+        
+        // 3. Warnschwelle prüfen
+        float limit = settingsGetBatMin();
+        if (limit > 0) {
+            if (currentVoltage < limit) {
+                if (!lowBatWarningSent) {
+                    String msg = "ALARM: LOW BATTERY (" + String(currentVoltage, 1) + "V)";
+                    logWarn(msg);
+                    mqttPublish(TOPIC_DIAG, msg.c_str());
+                    logSetLastDiag(msg);
+                    lowBatWarningSent = true;
+                }
+            } else if (currentVoltage > (limit + 0.2)) {
+                lowBatWarningSent = false;
+            }
         }
-
-        float u_adc = (float)raw * ADC_REF / (float)ADC_MAX;
-        float factor = (R1_kOhm + R2_kOhm) / R2_kOhm;
-        lastVoltage = u_adc * factor;
-        lastReadMs = now;
     }
 }
 
 float batteryGetVoltage() {
-    return lastVoltage;
+    return currentVoltage;
+}
+
+// NEU: Getter für den Rohwert
+float batteryGetRawValue() {
+    return currentRawVoltage;
 }

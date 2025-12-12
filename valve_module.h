@@ -10,3 +10,7 @@ ValveState valveGetState();
 
 void valveSafeBeforeUpdate();
 void valveSafeAfterUpdate();
+
+// === NEU: Zähler-Funktionen ===
+unsigned long valveGetDailyOpenSec(); // Abrufen
+void valveResetDailyOpenSec();        // Auf 0 setzen (für Mitternacht)
