@@ -361,6 +361,13 @@ on({id: ID_MQTT_TELE, change: 'ne'}, (obj) => {
     // Total (ESP: flow_total_l -> ioBroker: metrics.total_l)
     if (typeof data.flow_total_l === 'number')  
         setState(BASE + 'metrics.total_l', data.flow_total_l, true);
+        
+    // --- NEU: ROH-IMPULSE (für Kalibrierung) ---
+    // Das kommt jetzt neu aus der Firmware V1.2.9
+    if (typeof data.pulses === 'number')      
+        setState(BASE + 'metrics.pulses', data.pulses, true);
+    // ------------------------------------------
+
 
     // Batterie (ESP: battery_v -> ioBroker: metrics.vbat)
     if (typeof data.battery_v === 'number')     
