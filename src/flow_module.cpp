@@ -1,9 +1,12 @@
 #include "flow_module.h"
 #include "config.h"
 #include "logger.h"
+#include "settings_module.h" // NEU: Für K-Factor
+#include <Preferences.h>
 
-// DEINE FILTER PARAMETER
-static const float PULSES_PER_LITER = 450.0f; 
+// RTC_DATA_ATTR behält Wert bei Reboot (aber nicht bei Stromausfall)
+RTC_DATA_ATTR unsigned long rtcTotalPulses = 0;
+
 static const float MAX_LPM_STEP_FACTOR = 5.0f;
 static const float MAX_LPM_ABS         = 60.0f;
 static const unsigned long MAX_PULSES_PER_INTERVAL = 20000;
@@ -26,7 +29,20 @@ void flowInit() {
     pinMode(PIN_FLOW, INPUT_PULLUP);
     attachInterrupt(digitalPinToInterrupt(PIN_FLOW), flowIsr, FALLING);
     lastCalcMs = millis();
-    logInfo("Flow sensor initialized (Filtered)");
+
+    // Bei Stromausfall (RTC=0) versuchen, alten Stand aus Flash zu holen
+    if (rtcTotalPulses == 0) {
+        Preferences p;
+        p.begin("flow-data", true); // Read-only
+        unsigned long saved = p.getULong("pulses", 0);
+        p.end();
+        if (saved > 0) {
+            rtcTotalPulses = saved;
+            logInfo("Restored Flow Pulses from Flash: " + String(rtcTotalPulses));
+        }
+    }
+    
+    logInfo("Flow init. Total Pulses: " + String(rtcTotalPulses));
 }
 
 void flowLoop() {
@@ -34,34 +50,34 @@ void flowLoop() {
     // 100ms Fenster
     if (now - lastCalcMs >= 100) {
         
-        // FIX: Atomares Auslesen und Resetten
         noInterrupts();
         unsigned long pulses = pulseCount;
         pulseCount = 0;
         interrupts();
 
-        // Overflow Schutz
-        if (pulses > MAX_PULSES_PER_INTERVAL) {
-            pulses = 0; 
+        if (pulses > MAX_PULSES_PER_INTERVAL) pulses = 0; 
+        
+        // NEU: Zum Ewigen Zähler addieren
+        if (pulses > 0) {
+            rtcTotalPulses += pulses;
         }
 
-        // Berechnung
-        float pulsesPerSec = (float)pulses * 10.0f; // Weil 100ms Fenster
-        float litersPerSec = pulsesPerSec / PULSES_PER_LITER;
+        // Berechnung mit variablem Faktor aus Settings
+        float kFactor = settingsGetFlowFactor();
+        if (kFactor <= 0.1f) kFactor = 450.0f; // Fallback
+
+        float pulsesPerSec = (float)pulses * 10.0f; 
+        float litersPerSec = pulsesPerSec / kFactor;
         float candidateLpm = litersPerSec * 60.0f;
 
-        // Plausibilitäts-Filter
+        // Filterung
         if (candidateLpm > MAX_LPM_ABS) candidateLpm = MAX_LPM_ABS;
-        
-        // Sprung-Filter
         if (lastLpm > 0.1f) {
             float maxAllowed = lastLpm * MAX_LPM_STEP_FACTOR;
             if (candidateLpm > maxAllowed) candidateLpm = maxAllowed;
         }
 
-        // Summieren
         totalLiters += litersPerSec * ((now - lastCalcMs) / 1000.0f);
-        
         lastLpm = candidateLpm;
         lastCalcMs = now;
     }
@@ -69,6 +85,21 @@ void flowLoop() {
 
 float flowGetLpm() { return lastLpm; }
 float flowGetTotalLiters() { return totalLiters; }
+
+// NEU: Getter für Rohdaten
+unsigned long flowGetTotalPulses() {
+    return rtcTotalPulses;
+}
+
+// NEU: Speichern in Flash (wird bei Ventil-Zu aufgerufen)
+void flowSaveToFlash() {
+    Preferences p;
+    p.begin("flow-data", false);
+    p.putULong("pulses", rtcTotalPulses);
+    p.end();
+    // Optional: Loggen, aber nicht zu oft spammen
+    // logInfo("Saved pulses to Flash"); 
+}
 
 unsigned long flowGetLastPulseAgeMs() {
     if (lastPulseMicros == 0) return 0;

@@ -34,6 +34,7 @@ String buildTeleJson() {
     json += "\"valve\":\"" + String(valveGetState() == ValveState::OPEN ? "OPEN" : "CLOSED") + "\",";
     json += "\"flow_lpm\":" + String(flowGetLpm(), 2) + ",";
     json += "\"flow_total_l\":" + String(flowGetTotalLiters(), 2) + ",";
+    json += "\"pulses\":" + String(flowGetTotalPulses()) + ",";
     json += "\"battery_v\":" + String(batteryGetVoltage(), 2) + ",";
     json += "\"irr_mode\":\"" + String(irrigationGetMode() == IrrigationMode::AUTO ? "AUTO" : "MANUAL") + "\",";
     json += "\"irr_running\":" + String(irrigationIsRunning() ? "true" : "false") + ",";
@@ -137,6 +138,7 @@ void loop() {
             
             String extra = "\"last_run_l\":" + String(delta, 2);
             mqttPublishEvent("valve_close", extra);
+            flowSaveToFlash();
         }
         lastValveForLog = currentV;
     }

@@ -5,5 +5,9 @@ void flowInit();
 void flowLoop();
 float flowGetLpm();
 float flowGetTotalLiters();
-// NEU: Diagnose
+
+// NEU: Zähler & Save
+unsigned long flowGetTotalPulses();
+void flowSaveToFlash(); 
+
 unsigned long flowGetLastPulseAgeMs();

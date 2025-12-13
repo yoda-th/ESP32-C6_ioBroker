@@ -20,6 +20,10 @@ void settingsSetBatMin(float v);
 float settingsGetBatFactor();
 void settingsSetBatFactor(float f);
 
+// NEU: Flow Kalibrierungs-Faktor (Impulse pro Liter)
+float settingsGetFlowFactor();
+void settingsSetFlowFactor(float f);
+
 // --- MQTT Konfiguration ---
 String settingsGetMqttHost();
 void settingsSetMqttHost(const String& host);

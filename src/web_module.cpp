@@ -218,6 +218,7 @@ static void handleRoot() {
     html += "<p>Daily Limit (min):</p><input type='number' name='limit_min' value='" + String(settingsGetDailyLimitSec()/60) + "'>";
     html += "<p>Auto Reboot Hour (-1 = Off):</p><input type='number' name='reb_h' value='" + String(settingsGetRebootHour()) + "'>";
     html += "<p>Battery Min (V) / Factor:</p><input type='number' step='0.1' name='bat_min' value='" + String(settingsGetBatMin(),1) + "'> / <input type='number' step='0.01' name='bat_factor' value='" + String(settingsGetBatFactor(),2) + "'>";
+    html += "<p>Flow Factor (Imp/L):</p><input type='number' step='0.1' name='flow_k' value='" + String(settingsGetFlowFactor(),1) + "'>";
     html += "<br><br><input type='submit' class='btn btn-blue' value='Save Settings'></form></div>";
     
     html += getNavFooter();
@@ -298,6 +299,7 @@ static void handleSettingsPost() {
     if (server.hasArg("limit_min")) settingsSetDailyLimitSec(server.arg("limit_min").toInt() * 60); 
     if (server.hasArg("bat_min")) settingsSetBatMin(server.arg("bat_min").toFloat());
     if (server.hasArg("bat_factor")) settingsSetBatFactor(server.arg("bat_factor").toFloat());
+    if (server.hasArg("flow_k")) settingsSetFlowFactor(server.arg("flow_k").toFloat());
     if (server.hasArg("reb_h")) settingsSetRebootHour(server.arg("reb_h").toInt());
     server.sendHeader("Location", "/", true);
     server.send(302, "text/plain", "Saved");
