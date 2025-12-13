@@ -3,7 +3,7 @@
 // ==========================================================
 // FIRMWARE KONFIGURATION
 // ==========================================================
-#define FW_VERSION      "1.2.7" 
+#define FW_VERSION      "1.2.8" 
 #define DEVICE_NAME     "ESP-Valve-C6-01"
 #define MQTT_CLIENT_ID  "esp-valve-c6-01"
 
