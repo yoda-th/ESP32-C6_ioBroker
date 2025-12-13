@@ -1,0 +1,268 @@
+// 40_valve1_irrigation.js
+// --------------------------------------------------------------
+// Zeitbasierte Bewässerungsprogramme für Garden Valve1,
+// OHNE den ESP-Fallback zu stören.
+//
+// Prinzip:
+//  - Läuft jede Minute (schedule('* * * * *'))
+//  - Prüft, ob der ESP online & gesund ist (online, teleStale, error.state)
+//  - Wenn ja: führt konfigurierten RUN in Sekunden aus (cmd.runSeconds)
+//  - Wenn nein: macht NICHTS -> ESP-eigener Fallbackplan darf laufen.
+//
+// Programme:
+//  - Bis zu 3 Programme (prog1, prog2, prog3)
+//  - pro Programm:
+//      enabled (bool)
+//      hour (0-23)
+//      minute (0-59)
+//      duration_sec (0-3600)
+//      days (String: 'all' oder z.B. 'mon,wed,fri')
+//  - pro Lauf wird lastRunIso gesetzt, damit nicht doppelt ausgeführt wird.
+//
+// Voraussetzung:
+//  - 10_valve1_core.js läuft und pflegt:
+//      0_userdata.0.garden.valve1.online
+//      0_userdata.0.garden.valve1.health.teleStale
+//      0_userdata.0.garden.valve1.error.state  (vom Monitor-Script)
+//      0_userdata.0.garden.valve1.cmd.runSeconds
+
+const BASE = '0_userdata.0.garden.valve1.';
+const BASE_IRR = BASE + 'irrigation.';
+
+// States aus Core/Monitor
+const ID_ONLINE      = BASE + 'online';
+const ID_TELE_STALE  = BASE + 'health.teleStale';
+const ID_ERROR_STATE = BASE + 'error.state';     // aus Monitor-Script
+const ID_CMD_RUNSEC  = BASE + 'cmd.runSeconds';
+
+// Programme: prog1, prog2, prog3
+const PROGRAMS = ['prog1', 'prog2', 'prog3'];
+
+/************************************************************
+ * 1. Hilfsfunktionen & State-Erzeugung
+ ************************************************************/
+
+function ensureStateIrr(id, common) {
+    if (!existsState(id)) {
+        createState(id, common);
+    }
+}
+
+function createProgramStates(progName, defaults) {
+    const base = BASE_IRR + progName + '.';
+
+    ensureStateIrr(base + 'enabled', {
+        name: progName + ' enabled',
+        type: 'boolean',
+        role: 'switch',
+        read: true,
+        write: true,
+        def: defaults.enabled
+    });
+
+    ensureStateIrr(base + 'hour', {
+        name: progName + ' start hour (0-23)',
+        type: 'number',
+        role: 'level',
+        read: true,
+        write: true,
+        def: defaults.hour,
+        min: 0,
+        max: 23
+    });
+
+    ensureStateIrr(base + 'minute', {
+        name: progName + ' start minute (0-59)',
+        type: 'number',
+        role: 'level',
+        read: true,
+        write: true,
+        def: defaults.minute,
+        min: 0,
+        max: 59
+    });
+
+    ensureStateIrr(base + 'duration_sec', {
+        name: progName + ' duration in seconds',
+        type: 'number',
+        role: 'level.timer',
+        read: true,
+        write: true,
+        def: defaults.duration_sec,
+        min: 0,
+        max: 3600
+    });
+
+    ensureStateIrr(base + 'days', {
+        name: progName + ' days (all or e.g. \"mon,wed,fri\")',
+        type: 'string',
+        role: 'text',
+        read: true,
+        write: true,
+        def: defaults.days
+    });
+
+    ensureStateIrr(base + 'lastRunIso', {
+        name: progName + ' last run (ISO timestamp)',
+        type: 'string',
+        role: 'text',
+        read: true,
+        write: true,
+        def: ''
+    });
+
+    ensureStateIrr(base + 'lastRunKey', {
+        name: progName + ' last run key (YYYY-MM-DD HH:MM)',
+        type: 'string',
+        role: 'text',
+        read: true,
+        write: true,
+        def: ''
+    });
+}
+
+// Default-Konfiguration: prog1 = täglich 07:00 180s, prog2/3 deaktiviert
+createProgramStates('prog1', {
+    enabled: true,
+    hour: 7,
+    minute: 0,
+    duration_sec: 180, // 3 Minuten
+    days: 'all'
+});
+
+createProgramStates('prog2', {
+    enabled: false,
+    hour: 18,
+    minute: 0,
+    duration_sec: 120,
+    days: 'mon,wed,fri'
+});
+
+createProgramStates('prog3', {
+    enabled: false,
+    hour: 6,
+    minute: 0,
+    duration_sec: 60,
+    days: 'sat,sun'
+});
+
+/************************************************************
+ * 2. Hilfsfunktionen für Tages-Logik
+ ************************************************************/
+
+// wandelt JS getDay() (0=Sonntag...6=Samstag) in String
+function dayOfWeekStr(dow) {
+    switch (dow) {
+        case 0: return 'sun';
+        case 1: return 'mon';
+        case 2: return 'tue';
+        case 3: return 'wed';
+        case 4: return 'thu';
+        case 5: return 'fri';
+        case 6: return 'sat';
+        default: return '';
+    }
+}
+
+// prüft, ob der aktuelle Wochentag im days-String enthalten ist
+// days: 'all' oder CSV, z.B. 'mon,wed,fri'
+function isDayAllowed(daysStr, dowStr) {
+    if (!daysStr || typeof daysStr !== 'string') return false;
+    const s = daysStr.trim().toLowerCase();
+    if (s === 'all' || s === '*') return true;
+
+    const parts = s.split(',').map(p => p.trim()).filter(Boolean);
+    return parts.indexOf(dowStr) >= 0;
+}
+
+/************************************************************
+ * 3. Zentrale Prüf-Funktion pro Minute
+ ************************************************************/
+
+function checkAndRunPrograms() {
+    const now = new Date();
+    const hour = now.getHours();
+    const minute = now.getMinutes();
+    const dowStr = dayOfWeekStr(now.getDay());
+
+    const key = now.toISOString().slice(0, 16).replace('T', ' '); // "YYYY-MM-DD HH:MM"
+
+    // Erst Health prüfen
+    const stOnline     = getState(ID_ONLINE);
+    const stTeleStale  = getState(ID_TELE_STALE);
+    const stErr        = getState(ID_ERROR_STATE);
+
+    const online    = !!(stOnline && stOnline.val === true);
+    const teleStale = !!(stTeleStale && stTeleStale.val === true);
+    const hasError  = !!(stErr && stErr.val === true);
+
+    if (!online) {
+        // ESP nicht erreichbar → NICHT eingreifen, Fallback übernimmt
+        log('Valve1 Irrigation: ESP offline, Programme werden übersprungen (Fallback aktiv).', 'debug');
+        return;
+    }
+    if (teleStale) {
+        log('Valve1 Irrigation: Tele stale, Programme werden übersprungen.', 'debug');
+        return;
+    }
+    if (hasError) {
+        log('Valve1 Irrigation: error.state=true, Programme werden übersprungen.', 'debug');
+        return;
+    }
+
+    // Programme prüfen
+    PROGRAMS.forEach(progName => {
+        const base = BASE_IRR + progName + '.';
+
+        const stEnabled  = getState(base + 'enabled');
+        const stHour     = getState(base + 'hour');
+        const stMinute   = getState(base + 'minute');
+        const stDuration = getState(base + 'duration_sec');
+        const stDays     = getState(base + 'days');
+        const stLastKey  = getState(base + 'lastRunKey');
+
+        const enabled     = !!(stEnabled && stEnabled.val === true);
+        const pHour       = stHour && typeof stHour.val === 'number' ? stHour.val : 0;
+        const pMinute     = stMinute && typeof stMinute.val === 'number' ? stMinute.val : 0;
+        const durationSec = stDuration && typeof stDuration.val === 'number' ? stDuration.val : 0;
+        const daysStr     = stDays && String(stDays.val || '') || '';
+        const lastKey     = stLastKey && String(stLastKey.val || '') || '';
+
+        if (!enabled) return;
+        if (durationSec <= 0) return;
+
+        if (!isDayAllowed(daysStr, dowStr)) return;
+
+        if (pHour !== hour || pMinute !== minute) return;
+
+        // prüfen, ob in dieser Minute schon gelaufen
+        if (lastKey === key) {
+            // schon ausgeführt
+            return;
+        }
+
+        // Alles ok -> RUN auslösen
+        const cmdSec = Math.round(durationSec);
+        log('Valve1 Irrigation: Starte ' + progName + ' (RUN:' + cmdSec + 's) – ' +
+            'time=' + key + ', days=' + daysStr, 'info');
+
+        setState(ID_CMD_RUNSEC, cmdSec, false); // löst im Core ein RUN:x aus
+
+        setState(base + 'lastRunIso', new Date().toISOString(), true);
+        setState(base + 'lastRunKey', key, true);
+    });
+}
+
+/************************************************************
+ * 4. Schedule – jede Minute prüfen
+ ************************************************************/
+
+schedule('* * * * *', () => {
+    try {
+        checkAndRunPrograms();
+    } catch (e) {
+        log('Valve1 Irrigation: Fehler in checkAndRunPrograms: ' + e, 'warn');
+    }
+});
+
+log('Valve1 Irrigation Script V1 gestartet – Programme werden minütlich geprüft.', 'info');

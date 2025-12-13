@@ -1,0 +1,603 @@
+// ioBroker JavaScript – Garden Valve1 Integration (ESP32-C6 V4.2)
+// --------------------------------------------------------------
+// Funktionen:
+//  - MQTT-Integration für ESP32-C6 Ventil-Node (garden/valve1/... Topics)
+//  - Steuerung: ON / OFF / RUN:x Sekunden aus ioBroker-States heraus
+//  - Telemetrie-Übernahme aus JSON (flow_l_min, total_l, vbat, pulses, delta_l, etc.)
+//  - Online-/Offline-Erkennung über LWT (Last Will)
+//  - Event-Logging (run_timeout, maxrun_timeout, etc.)
+//  - Verarbeitung von Offline-History-Samples mit korrektem Zeitstempel (ts)
+//  - Alle relevanten Werte in 0_userdata.0.garden.valve1.* abgelegt → History-Adapter kann diese loggen.
+//  - NEU: Tele-Watchdog + Health-States
+//  - NEU: cmd.lastCommand / cmd.lastCommand_ts für spätere Monitor-Skripte
+//
+// Voraussetzungen:
+//  - MQTT-Adapter installiert, Instanz z. B. mqtt.0
+//  - Topics im MQTT-Adapter im Standard-Schema → Topic "garden/valve1/tele" wird zu Objekt-ID "mqtt.0.garden.valve1.tele"
+//  - History-Adapter optional, um die 0_userdata-Werte langfristig zu speichern.
+
+/************************************************************
+ * 1. Konfiguration – hier ggf. anpassen
+ ************************************************************/
+
+// MQTT-Instanzpräfix (an deine Umgebung anpassen, z. B. "mqtt.0" oder "mqtt.1")
+const MQTT_PREFIX = 'mqtt.0.'; // mit Punkt am Ende
+
+// Basis-Pfad der Garden-Node
+const TOPIC_BASE     = 'garden.valve1.';
+
+// MQTT-Objekt-IDs in ioBroker
+const ID_MQTT_LWT    = MQTT_PREFIX + TOPIC_BASE + 'lwt';  // garden/valve1/online
+const ID_MQTT_TELE   = MQTT_PREFIX + TOPIC_BASE + 'tele';    // garden/valve1/tele
+const ID_MQTT_EVENT  = MQTT_PREFIX + TOPIC_BASE + 'event';   // garden/valve1/event
+const ID_MQTT_CMD    = MQTT_PREFIX + TOPIC_BASE + 'cmnd';    // garden/valve1/cmnd
+const ID_MQTT_CONFIG = MQTT_PREFIX + TOPIC_BASE + 'config.set';   // garden/valve1/config/set
+const ID_MQTT_CFG_ST = MQTT_PREFIX + TOPIC_BASE + 'config.state'; // garden/valve1/config/state
+const ID_MQTT_HIST   = MQTT_PREFIX + TOPIC_BASE + 'history';      // garden/valve1/history
+const ID_MQTT_STAT   = MQTT_PREFIX + TOPIC_BASE + 'stat';         // garden/valve1/stat (Ventil-Status ON/OFF)
+
+// ioBroker-Basis für eigene States
+const BASE = '0_userdata.0.garden.valve1.';
+
+// Tele-Watchdog-Parameter
+// Da Firmware im Idle-Modus nur alle 60s sendet, setzen wir das Intervall hoch.
+const TELE_EXPECTED_INTERVAL_MS   = 65000; // 65 Sekunden (Puffer für 60s Takt)
+const TELE_STALE_FACTOR           = 2;     // Nach 2x 65s (über 2 Min) ohne Meldung -> Alarm
+const TELE_WATCHDOG_INTERVAL_MS   = 10000;  // alle 10s prüfen
+
+let lastTeleTsMs   = 0;     // letzter Tele-Zeitpunkt (ms)
+let teleStalePrev  = false; // vorheriger Stale-Zustand
+
+/************************************************************
+ * 2. Hilfsfunktionen zum Erzeugen von States
+ ************************************************************/
+
+function ensureState(id, common) {
+    if (!existsState(id)) {
+        createState(id, common);
+    }
+}
+
+function createAllStates() {
+    // Online-Status (LWT)
+    ensureState(BASE + 'online', {
+        name: 'Valve1 Online (LWT)',
+        type: 'boolean',
+        role: 'indicator.reachable',
+        read: true,
+        write: false,
+        def: false
+    });
+
+    // Ventil-Status (ON/OFF)
+    ensureState(BASE + 'valveOn', {
+        name: 'Valve1 Ventilstatus',
+        type: 'boolean',
+        role: 'switch',
+        read: true,
+        write: false,
+        def: false
+    });
+
+    // Telemetrie-Werte
+    ensureState(BASE + 'metrics.pulses', {
+        name: 'Flow-Pulse total',
+        type: 'number',
+        role: 'value',
+        read: true,
+        write: false,
+        def: 0
+    });
+
+    ensureState(BASE + 'metrics.delta_pulses', {
+        name: 'Flow-Pulse Delta seit letztem Tele',
+        type: 'number',
+        role: 'value',
+        read: true,
+        write: false,
+        def: 0
+    });
+
+    ensureState(BASE + 'metrics.delta_l', {
+        name: 'Delta Liter seit letztem Tele',
+        type: 'number',
+        role: 'value.liter',
+        read: true,
+        write: false,
+        def: 0
+    });
+
+    ensureState(BASE + 'metrics.flow_l_min', {
+        name: 'Momentan-Flow [L/min]',
+        type: 'number',
+        role: 'value.flow',
+        read: true,
+        write: false,
+        def: 0
+    });
+
+    ensureState(BASE + 'metrics.total_l', {
+        name: 'Gesamt-Liter',
+        type: 'number',
+        role: 'value.liter',
+        read: true,
+        write: false,
+        def: 0
+    });
+
+    ensureState(BASE + 'metrics.vbat', {
+        name: 'Batteriespannung [V]',
+        type: 'number',
+        role: 'value.voltage',
+        read: true,
+        write: false,
+        def: 0
+    });
+
+    // Event-Text & letzter Event-Typ
+    ensureState(BASE + 'lastEvent.raw', {
+        name: 'Letzte Event-Message (Raw)',
+        type: 'string',
+        role: 'text',
+        read: true,
+        write: false,
+        def: ''
+    });
+
+    ensureState(BASE + 'lastEvent.type', {
+        name: 'Letzter Event-Typ (parsed)',
+        type: 'string',
+        role: 'text',
+        read: true,
+        write: false,
+        def: ''
+    });
+
+    // Zähler für bestimmte Events (z. B. Sicherheitsabschaltungen)
+    ensureState(BASE + 'counters.run_timeout', {
+        name: 'Anzahl RUN-Timeouts',
+        type: 'number',
+        role: 'value',
+        read: true,
+        write: false,
+        def: 0
+    });
+
+    ensureState(BASE + 'counters.maxrun_timeout', {
+        name: 'Anzahl Max-Run-Timeouts',
+        type: 'number',
+        role: 'value',
+        read: true,
+        write: false,
+        def: 0
+    });
+
+    // NEU: Tele-Timeout-Zähler
+    ensureState(BASE + 'counters.tele_timeout', {
+        name: 'Anzahl Tele-Timeouts',
+        type: 'number',
+        role: 'value',
+        read: true,
+        write: false,
+        def: 0
+    });
+
+    // Manuelle Steuerung aus ioBroker
+    ensureState(BASE + 'cmd.manualOn', {
+        name: 'Manuell Ventil EIN/AUS',
+        type: 'boolean',
+        role: 'switch',
+        read: true,
+        write: true,
+        def: false
+    });
+
+    ensureState(BASE + 'cmd.runSeconds', {
+        name: 'Manueller RUN in Sekunden',
+        type: 'number',
+        role: 'level.timer',
+        read: true,
+        write: true,
+        def: 0,
+        min: 0,
+        max: 3600
+    });
+
+    ensureState(BASE + 'cmd.run1min', {
+        name: 'RUN 60s (Trigger)',
+        type: 'boolean',
+        role: 'button',
+        read: true,
+        write: true,
+        def: false
+    });
+
+    ensureState(BASE + 'cmd.run2min', {
+        name: 'RUN 120s (Trigger)',
+        type: 'boolean',
+        role: 'button',
+        read: true,
+        write: true,
+        def: false
+    });
+
+    ensureState(BASE + 'cmd.run3min', {
+        name: 'RUN 180s (Trigger)',
+        type: 'boolean',
+        role: 'button',
+        read: true,
+        write: true,
+        def: false
+    });
+
+    // NEU: letzter gesendeter Befehl + Zeitpunkt
+    ensureState(BASE + 'cmd.lastCommand', {
+        name: 'Letzter gesendeter Befehl (z. B. ON, OFF, RUN:120)',
+        type: 'string',
+        role: 'text',
+        read: true,
+        write: false,
+        def: ''
+    });
+
+    ensureState(BASE + 'cmd.lastCommand_ts', {
+        name: 'Zeitpunkt des letzten Befehls (UNIX-Sekunden)',
+        type: 'number',
+        role: 'value.time',
+        read: true,
+        write: false,
+        def: 0
+    });
+
+    // Konfiguration aus dem ESP (Config-State-JSON)
+    ensureState(BASE + 'config.json', {
+        name: 'Aktuelle Konfiguration (JSON vom ESP)',
+        type: 'string',
+        role: 'json',
+        read: true,
+        write: false,
+        def: ''
+    });
+
+    // Platzhalter für History-Status
+    ensureState(BASE + 'history.lastImport', {
+        name: 'Letzter Offline-History-Import (ISO)',
+        type: 'string',
+        role: 'text',
+        read: true,
+        write: false,
+        def: ''
+    });
+
+    // NEU: Health-States für Tele-Watchdog
+    ensureState(BASE + 'health.lastTeleTs', {
+        name: 'Letzter Telezeitpunkt (UNIX ms)',
+        type: 'number',
+        role: 'value.time',
+        read: true,
+        write: false,
+        def: 0
+    });
+
+    ensureState(BASE + 'health.lastTeleIso', {
+        name: 'Letzter Telezeitpunkt (ISO-String)',
+        type: 'string',
+        role: 'text',
+        read: true,
+        write: false,
+        def: ''
+    });
+
+    ensureState(BASE + 'health.teleStale', {
+        name: 'Tele stale (keine Tele-Daten seit definiertem Zeitraum)',
+        type: 'boolean',
+        role: 'indicator.maintenance',
+        read: true,
+        write: false,
+        def: false
+    });
+}
+
+createAllStates();
+
+/************************************************************
+ * 3. MQTT → ioBroker: Listener für LWT, Tele, Event, Config, History, Stat
+ ************************************************************/
+
+// Online-Status über LWT
+// NEU (Robust):
+/************************************************************
+ * 4. Online-Status über LWT
+ ************************************************************/
+
+// Zentrale Funktion zum Prüfen und Setzen des Online-Status
+function checkLwtStatus() {
+    // Aktuellen LWT-Wert abrufen
+    const st = getState(ID_MQTT_LWT);
+    const val = st && st.val;
+    if (typeof val === 'undefined' || val === null) return;
+
+    // LWT-Status ist "Online" (großes O), "online" (kleines o), true oder 1
+    const online = (String(val).toLowerCase() === 'online' || val === true || val === 1);
+    
+    // Den ioBroker 0_userdata-Status setzen
+    setState(BASE + 'online', online, true);
+    
+    // Zur Fehlersuche (optional)
+    log('Valve1: LWT-Status gesetzt auf ' + online + ' (Raw: ' + val + ')', 'debug');
+}
+
+// A) Listener für Änderungen: Löst aus, wenn sich der Zustand ändert (z.B. Offline)
+on({ id: ID_MQTT_LWT, change: 'any' }, (obj) => {
+    checkLwtStatus();
+});
+
+// B) **WICHTIG**: Sofortige Prüfung beim Skriptstart (Initialisierung)
+// Dadurch wird der Status auch dann auf TRUE gesetzt, wenn der ESP schon online ist.
+setTimeout(() => {
+    checkLwtStatus();
+}, 500); // Kurze Verzögerung, um sicherzustellen, dass ioBroker den State schon eingelesen hat
+
+// Telemetrie (JSON) → einzelne Werte
+on({id: ID_MQTT_TELE, change: 'ne'}, (obj) => {
+    const s = obj.state && obj.state.val;
+    if (!s) return;
+
+    let data;
+    try {
+        data = JSON.parse(s);
+    } catch (e) {
+        log('Valve1: Fehler beim JSON-Parse von TELE: ' + e, 'warn');
+        return;
+    }
+
+    // ANPASSUNG AN NEUE FIRMWARE:
+    // JSON Key im ESP -> Ziel-Datenpunkt im ioBroker
+
+    // Flow (ESP: flow_lpm -> ioBroker: metrics.flow_l_min)
+    if (typeof data.flow_lpm === 'number')      
+        setState(BASE + 'metrics.flow_l_min', data.flow_lpm, true);
+
+    // Total (ESP: flow_total_l -> ioBroker: metrics.total_l)
+    if (typeof data.flow_total_l === 'number')  
+        setState(BASE + 'metrics.total_l', data.flow_total_l, true);
+
+    // Batterie (ESP: battery_v -> ioBroker: metrics.vbat)
+    if (typeof data.battery_v === 'number')     
+        setState(BASE + 'metrics.vbat', data.battery_v, true);
+    
+    // Tele-Health aktualisieren
+    lastTeleTsMs = Date.now();
+    setState(BASE + 'health.lastTeleTs', lastTeleTsMs, true);
+    setState(BASE + 'health.lastTeleIso', new Date(lastTeleTsMs).toISOString(), true);
+    setState(BASE + 'health.teleStale', false, true);
+});
+
+// Ventil-Status (ON/OFF/OPEN/CLOSED) aus garden/valve1/stat
+on({id: ID_MQTT_STAT, change: 'ne'}, (obj) => {
+    const s = obj.state && obj.state.val;
+    if (typeof s === 'undefined' || s === null) return;
+
+    const str = String(s).toUpperCase();
+    // Wir akzeptieren jetzt ON oder OPEN als "An"
+    const on = (str === 'ON' || str === 'OPEN');
+    
+    setState(BASE + 'valveOn', on, true);
+});
+
+// Config-State (JSON) vom ESP → als Text ablegen (z. B. zur Anzeige oder Export)
+on({id: ID_MQTT_CFG_ST, change: 'ne'}, (obj) => {
+    const s = obj.state && obj.state.val;
+    if (!s) return;
+    setState(BASE + 'config.json', s, true);
+});
+
+// Event-Messages → Logging und Zähler
+on({id: ID_MQTT_EVENT, change: 'ne'}, (obj) => {
+    const s = obj.state && obj.state.val;
+    if (!s) return;
+
+    setState(BASE + 'lastEvent.raw', s, true);
+
+    let type = s;
+    if (s.indexOf(':') >= 0) {
+        type = s.split(':')[0];
+    }
+    setState(BASE + 'lastEvent.type', type, true);
+
+    switch (type) {
+        case 'run_timeout':
+            getState(BASE + 'counters.run_timeout', (st) => {
+                const v = (st && typeof st.val === 'number') ? st.val : 0;
+                setState(BASE + 'counters.run_timeout', v + 1, true);
+            });
+            break;
+        case 'maxrun_timeout':
+            getState(BASE + 'counters.maxrun_timeout', (st) => {
+                const v = (st && typeof st.val === 'number') ? st.val : 0;
+                setState(BASE + 'counters.maxrun_timeout', v + 1, true);
+            });
+            break;
+        case 'tele_timeout':
+            getState(BASE + 'counters.tele_timeout', (st) => {
+                const v = (st && typeof st.val === 'number') ? st.val : 0;
+                setState(BASE + 'counters.tele_timeout', v + 1, true);
+            });
+            break;
+        default:
+            // andere Events nur loggen
+            break;
+    }
+});
+
+// Offline-History vom ESP (jedes JSON ein Sample mit ts, flow_l_min, total_l, vbat, valve)
+on({id: ID_MQTT_HIST, change: 'ne'}, (obj) => {
+    const s = obj.state && obj.state.val;
+    if (!s) return;
+
+    let data;
+    try {
+        data = JSON.parse(s);
+    } catch (e) {
+        log('Valve1: Fehler beim JSON-Parse von HISTORY: ' + e, 'warn');
+        return;
+    }
+
+    // ts = UNIX-Sekunden oder 0
+    let tsMs = Date.now();
+    if (typeof data.ts === 'number' && data.ts > 0) {
+        tsMs = data.ts * 1000;
+    }
+
+    // Wir schreiben die Messwerte mit diesem ts in die gleichen States wie TELE.
+    // Falls der History-Import History-Adapter/Influx nutzen soll, bitte bei diesen States History aktivieren.
+    if (typeof data.flow_l_min === 'number') {
+        setState(BASE + 'metrics.flow_l_min', {val: data.flow_l_min, ack: true, ts: tsMs});
+    }
+    if (typeof data.total_l === 'number') {
+        setState(BASE + 'metrics.total_l', {val: data.total_l, ack: true, ts: tsMs});
+    }
+    if (typeof data.vbat === 'number') {
+        setState(BASE + 'metrics.vbat', {val: data.vbat, ack: true, ts: tsMs});
+    }
+    if (typeof data.delta_l === 'number') {
+        setState(BASE + 'metrics.delta_l', {val: data.delta_l, ack: true, ts: tsMs});
+    }
+
+    if (typeof data.valve === 'string') {
+        const on = (data.valve.toUpperCase() === 'ON');
+        setState(BASE + 'valveOn', {val: on, ack: true, ts: tsMs});
+    }
+
+    const iso = new Date(tsMs).toISOString();
+    setState(BASE + 'history.lastImport', iso, true);
+});
+
+/************************************************************
+ * 4. ioBroker → MQTT: Manuelle Steuerung + lastCommand
+ ************************************************************/
+
+function updateLastCommand(cmdStr) {
+    const nowSec = Math.floor(Date.now() / 1000);
+    setState(BASE + 'cmd.lastCommand', cmdStr, true);
+    setState(BASE + 'cmd.lastCommand_ts', nowSec, true);
+}
+
+// 4.1: Manuell EIN/AUS
+on({id: BASE + 'cmd.manualOn', change: 'ne'}, (obj) => {
+    const val = obj.state && obj.state.val;
+    if (val === true) {
+        // Ventil EIN -> Firmware erwartet "OPEN"
+        setState(ID_MQTT_CMD, 'OPEN', false);
+        updateLastCommand('OPEN'); // Wichtig für Monitor-Skript
+        log('Valve1: Manuell OPEN (via cmd.manualOn)', 'info');
+    } else if (val === false) {
+        // Ventil AUS -> Firmware erwartet "CLOSE"
+        setState(ID_MQTT_CMD, 'CLOSE', false);
+        updateLastCommand('CLOSE');
+        log('Valve1: Manuell CLOSE (via cmd.manualOn)', 'info');
+    }
+});
+
+// 4.2: Manuell RUN:x Sekunden
+on({id: BASE + 'cmd.runSeconds', change: 'ne'}, (obj) => {
+    const sec = obj.state && obj.state.val;
+    if (typeof sec !== 'number' || sec <= 0) return;
+
+    const s = Math.round(sec);
+    const cmd = 'RUN:' + s;
+    setState(ID_MQTT_CMD, cmd, false);
+    updateLastCommand(cmd);
+    log('Valve1: Manuell ' + cmd + ' (via cmd.runSeconds)', 'info');
+});
+
+// 4.3: Komfort-Buttons – 1/2/3 Minuten RUN
+on({id: BASE + 'cmd.run1min', change: 'ne'}, (obj) => {
+    const val = obj.state && obj.state.val;
+    if (!val) return;
+    const cmd = 'RUN:60';
+    setState(ID_MQTT_CMD, cmd, false);
+    updateLastCommand(cmd);
+    log('Valve1: RUN 60s (via cmd.run1min)', 'info');
+    // Button automatisch zurücksetzen
+    setState(BASE + 'cmd.run1min', false, true);
+});
+
+on({id: BASE + 'cmd.run2min', change: 'ne'}, (obj) => {
+    const val = obj.state && obj.state.val;
+    if (!val) return;
+    const cmd = 'RUN:120';
+    setState(ID_MQTT_CMD, cmd, false);
+    updateLastCommand(cmd);
+    log('Valve1: RUN 120s (via cmd.run2min)', 'info');
+    setState(BASE + 'cmd.run2min', false, true);
+});
+
+on({id: BASE + 'cmd.run3min', change: 'ne'}, (obj) => {
+    const val = obj.state && obj.state.val;
+    if (!val) return;
+    const cmd = 'RUN:180';
+    setState(ID_MQTT_CMD, cmd, false);
+    updateLastCommand(cmd);
+    log('Valve1: RUN 180s (via cmd.run3min)', 'info');
+    setState(BASE + 'cmd.run3min', false, true);
+});
+
+/************************************************************
+ * 5. Tele-Watchdog (Health)
+ ************************************************************/
+
+setInterval(() => {
+    // Wenn LWT offline → Tele-Stale hier nicht werten
+    const stOnline = getState(BASE + 'online');
+    const online = stOnline && stOnline.val === true;
+
+    if (!online) {
+        // wenn offline, Tele-Stale zurücksetzen
+        if (teleStalePrev) {
+            setState(BASE + 'health.teleStale', false, true);
+            teleStalePrev = false;
+        }
+        return;
+    }
+
+    if (!lastTeleTsMs) {
+        return; // noch keine Tele erhalten
+    }
+
+    const diff = Date.now() - lastTeleTsMs;
+    const threshold = TELE_EXPECTED_INTERVAL_MS * TELE_STALE_FACTOR;
+    const stale = diff > threshold;
+
+    if (stale && !teleStalePrev) {
+        teleStalePrev = true;
+        setState(BASE + 'health.teleStale', true, true);
+
+        const msg = 'tele_timeout: no tele for ~' + Math.round(diff / 1000) + 's';
+        setState(BASE + 'lastEvent.raw', msg, true);
+        setState(BASE + 'lastEvent.type', 'tele_timeout', true);
+
+        getState(BASE + 'counters.tele_timeout', (st) => {
+            const v = (st && typeof st.val === 'number') ? st.val : 0;
+            setState(BASE + 'counters.tele_timeout', v + 1, true);
+        });
+
+        log('Valve1: ' + msg, 'warn');
+    } else if (!stale && teleStalePrev) {
+        teleStalePrev = false;
+        setState(BASE + 'health.teleStale', false, true);
+        log('Valve1: Tele recovered', 'info');
+    }
+}, TELE_WATCHDOG_INTERVAL_MS);
+
+/************************************************************
+ * 6. Platzhalter für spätere Automatik/Scheduling
+ ************************************************************/
+
+// Hier können später komplexere Automatikregeln hinzukommen:
+// - Zeitpläne (cron) pro Zone
+// - Abhängigkeit von Bodenfeuchte-/Regensensoren
+// - Maximal-Liter pro Tag/Woche
+// - E-Mail/Telegram-Benachrichtigungen bei run_timeout, maxrun_timeout oder niedriger Batterie
+
+log('Valve1 Core Script V1.1 initialisiert – MQTT-Bindings + Tele-Watchdog aktiv.', 'info');

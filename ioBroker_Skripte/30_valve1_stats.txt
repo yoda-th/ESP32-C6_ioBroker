@@ -1,0 +1,261 @@
+// 20_valve1_monitor.js
+// --------------------------------------------------------------
+// Überwachung der Ventil-Reaktion nach Kommandos
+//  - prüft nach ON/OFF/RUN:x, ob valveOn passt
+//  - optional: bei ON/RUN, ob ein Mindest-Flow anliegt
+//  - setzt Fehler-States unter 0_userdata.0.garden.valve1.error.*
+//
+// Dieses Skript verlässt sich auf das Core-Skript (10_valve1_core.js):
+//  - cmd.lastCommand / cmd.lastCommand_ts
+//  - valveOn
+//  - metrics.flow_l_min
+//  - online, health.teleStale
+
+const BASE_MON = '0_userdata.0.garden.valve1.';
+
+// Konfigurierbare Parameter
+const CHECK_DELAY_MS       = 3000;   // wie lange nach Befehl warten, bevor geprüft wird
+const MIN_FLOW_ON          = 0.3;    // L/min – minimaler Flow, der als „Wasser fließt“ gilt
+const CHECK_FLOW_ON        = true;   // Flow-Plausibilitätsprüfung bei ON/RUN aktiv?
+
+// IDs (States aus Core)
+const ID_CMD_LAST      = BASE_MON + 'cmd.lastCommand';
+const ID_CMD_LAST_TS   = BASE_MON + 'cmd.lastCommand_ts';
+const ID_VALVE_ON      = BASE_MON + 'valveOn';
+const ID_FLOW_L_MIN    = BASE_MON + 'metrics.flow_l_min';
+const ID_ONLINE        = BASE_MON + 'online';
+const ID_TELE_STALE    = BASE_MON + 'health.teleStale';
+
+// Error-States (werden hier neu angelegt/verwaltet)
+const ID_ERR_STATE       = BASE_MON + 'error.state';
+const ID_ERR_MSG         = BASE_MON + 'error.message';
+const ID_ERR_CODE        = BASE_MON + 'error.code';
+const ID_ERR_LASTCHECK   = BASE_MON + 'error.lastCheckIso';
+const ID_ERR_VALVE_MIS   = BASE_MON + 'error.valve_mismatch';
+const ID_ERR_FLOW_LOW    = BASE_MON + 'error.flow_low';
+
+// Hilfsfunktionen
+function ensureStateMon(id, common) {
+    if (!existsState(id)) {
+        createState(id, common);
+    }
+}
+
+/************************************************************
+ * 1. Error-States anlegen
+ ************************************************************/
+
+ensureStateMon(ID_ERR_STATE, {
+    name: 'Error state (irgendein Fehler aktiv)',
+    type: 'boolean',
+    role: 'indicator.error',
+    read: true,
+    write: true,
+    def: false
+});
+
+ensureStateMon(ID_ERR_MSG, {
+    name: 'Error message (letzte Beschreibung)',
+    type: 'string',
+    role: 'text',
+    read: true,
+    write: true,
+    def: ''
+});
+
+ensureStateMon(ID_ERR_CODE, {
+    name: 'Error code (valve_mismatch, flow_low, ...)',
+    type: 'string',
+    role: 'text',
+    read: true,
+    write: true,
+    def: ''
+});
+
+ensureStateMon(ID_ERR_LASTCHECK, {
+    name: 'Zeitpunkt der letzten Prüfung (ISO-String)',
+    type: 'string',
+    role: 'text',
+    read: true,
+    write: false,
+    def: ''
+});
+
+ensureStateMon(ID_ERR_VALVE_MIS, {
+    name: 'Ventilzustand passt nicht zum Befehl',
+    type: 'boolean',
+    role: 'indicator.error',
+    read: true,
+    write: true,
+    def: false
+});
+
+ensureStateMon(ID_ERR_FLOW_LOW, {
+    name: 'Flow zu niedrig trotz Ventil ON',
+    type: 'boolean',
+    role: 'indicator.error',
+    read: true,
+    write: true,
+    def: false
+});
+
+/************************************************************
+ * 2. Fehler-Setzen & -Zurücksetzen
+ ************************************************************/
+
+function clearAllErrors() {
+    setState(ID_ERR_STATE, false, true);
+    setState(ID_ERR_MSG, '', true);
+    setState(ID_ERR_CODE, '', true);
+    setState(ID_ERR_VALVE_MIS, false, true);
+    setState(ID_ERR_FLOW_LOW, false, true);
+    setState(ID_ERR_LASTCHECK, new Date().toISOString(), true);
+}
+
+function setError(code, msg, opts) {
+    opts = opts || {};
+    setState(ID_ERR_STATE, true, true);
+    setState(ID_ERR_CODE, code, true);
+    setState(ID_ERR_MSG, msg, true);
+
+    if (opts.valveMismatch !== undefined) {
+        setState(ID_ERR_VALVE_MIS, !!opts.valveMismatch, true);
+    }
+    if (opts.flowLow !== undefined) {
+        setState(ID_ERR_FLOW_LOW, !!opts.flowLow, true);
+    }
+
+    setState(ID_ERR_LASTCHECK, new Date().toISOString(), true);
+    log('Valve1 Monitor ERROR [' + code + ']: ' + msg, 'warn');
+}
+
+/************************************************************
+ * 3. Prüf-Logik nach Kommandos
+ ************************************************************/
+
+let pendingTimer = null;
+
+function scheduleCheckForCommand(cmdAtSchedule, tsAtSchedule) {
+    // alten Timer abbrechen
+    if (pendingTimer !== null) {
+        clearTimeout(pendingTimer);
+        pendingTimer = null;
+    }
+
+    pendingTimer = setTimeout(() => {
+        pendingTimer = null;
+
+        // 3.1 Aktuellen lastCommand / ts lesen
+        const stCmd  = getState(ID_CMD_LAST);
+        const stCmdTs = getState(ID_CMD_LAST_TS);
+
+        const currentCmd = stCmd && String(stCmd.val || '').toUpperCase();
+        const currentTs  = stCmdTs && Number(stCmdTs.val || 0);
+
+        // Wenn sich Command oder ts geändert hat, ist ein neuer Befehl da → alten Check ignorieren
+        if (currentCmd !== cmdAtSchedule || currentTs !== tsAtSchedule) {
+            return;
+        }
+
+        // 3.2 Online-/Tele-Status checken
+        const stOnline   = getState(ID_ONLINE);
+        const stTeleStale = getState(ID_TELE_STALE);
+
+        const online   = !!(stOnline && stOnline.val === true);
+        const teleStale = !!(stTeleStale && stTeleStale.val === true);
+
+        if (!online) {
+            setError('offline', 'Gerät offline während Prüfzeitpunkt. Command=' + currentCmd, {valveMismatch: false});
+            return;
+        }
+
+        if (teleStale) {
+            setError('tele_stale', 'Keine aktuellen Tele-Daten während Prüfzeitpunkt. Command=' + currentCmd, {valveMismatch: false});
+            return;
+        }
+
+        // 3.3 Ventilzustand lesen
+        const stValveOn = getState(ID_VALVE_ON);
+        const valveOn   = !!(stValveOn && stValveOn.val === true);
+
+        // 3.4 Flow lesen (für Plausibilität)
+        let flow = 0;
+        const stFlow = getState(ID_FLOW_L_MIN);
+        if (stFlow && typeof stFlow.val === 'number') {
+            flow = stFlow.val;
+        }
+
+        // 3.5 Erwarteten Zustand aus Command ableiten
+        // OPEN / CLOSE / ON / OFF / RUN:x
+        let expectedOn = null;
+        
+        // Wir prüfen jetzt auf OPEN (neu) und ON (alt/fallback)
+        if (currentCmd === 'OPEN' || currentCmd === 'ON') {
+            expectedOn = true;
+        } 
+        // Wir prüfen auf CLOSE (neu) und OFF (alt/fallback)
+        else if (currentCmd === 'CLOSE' || currentCmd === 'OFF') {
+            expectedOn = false;
+        } 
+        else if (currentCmd.startsWith('RUN:')) {
+            expectedOn = true;
+        } else {
+            return;
+        }
+
+        // 3.6 Ventil-Zustand prüfen
+        if (expectedOn === true && !valveOn) {
+            setError('valve_mismatch_on', 'Befehl ' + currentCmd + ' gesendet, aber valveOn=false.', {valveMismatch: true});
+            return;
+        }
+
+        if (expectedOn === false && valveOn) {
+            setError('valve_mismatch_off', 'Befehl ' + currentCmd + ' gesendet, aber valveOn=true.', {valveMismatch: true});
+            return;
+        }
+
+        // 3.7 Flow-Plausibilitätsprüfung (nur bei ON/RUN)
+        if (expectedOn === true && CHECK_FLOW_ON) {
+            if (flow < MIN_FLOW_ON) {
+                setError(
+                    'flow_low',
+                    'Ventil ON (Command ' + currentCmd + '), aber Flow_l_min=' + flow.toFixed(3) + ' (< ' + MIN_FLOW_ON + ').',
+                    {flowLow: true}
+                );
+                return;
+            }
+        }
+
+        // alles gut → Fehler zurücksetzen
+        clearAllErrors();
+        log('Valve1 Monitor: Command ' + currentCmd + ' erfolgreich, valveOn=' + valveOn + ', flow=' + flow.toFixed(3) + ' L/min', 'info');
+    }, CHECK_DELAY_MS);
+}
+
+/************************************************************
+ * 4. Listener auf cmd.lastCommand
+ ************************************************************/
+
+on({ id: ID_CMD_LAST, change: 'ne' }, (obj) => {
+    const raw = obj.state && obj.state.val;
+    if (!raw) return;
+
+    const cmdStr = String(raw).toUpperCase();
+
+    // ts zum Zeitpunkt der Änderung lesen
+    const stTs = getState(ID_CMD_LAST_TS);
+    const cmdTs = stTs && Number(stTs.val || 0);
+
+    // Nur interessante Kommandos prüfen
+    if (cmdStr === 'ON' || cmdStr === 'OFF' || cmdStr.startsWith('RUN:')) {
+        log('Valve1 Monitor: Command erkannt -> ' + cmdStr + ' (ts=' + cmdTs + '), Prüfung geplant in ' + (CHECK_DELAY_MS/1000) + 's', 'debug');
+        scheduleCheckForCommand(cmdStr, cmdTs);
+    }
+});
+
+/************************************************************
+ * 5. Initial: keine Fehler beim Start
+ ************************************************************/
+
+clearAllErrors();
+log('Valve1 Monitor Script V1 gestartet – wartet auf cmd.lastCommand.', 'info');
