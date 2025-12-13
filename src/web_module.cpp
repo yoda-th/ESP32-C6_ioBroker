@@ -1,7 +1,6 @@
 /****************************************************
  * web_module.cpp
- * Firmware: V1.2.8
- * Fix: Alarm display logic (Anything != OK is RED)
+ * Firmware: V1.2.9 - Timezone & Mode Display Fix
  ****************************************************/
 
 #include "web_module.h"
@@ -26,7 +25,8 @@ const String dayNames[] = {"Su","Mo","Tu","We","Th","Fr","Sa"};
 const char* COMMON_CSS = 
 "<style>"
 "body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 10px; background: #f4f4f9; color: #333; max-width: 800px; margin: 0 auto; }"
-"h1 { font-size: 1.5rem; margin-bottom: 10px; color: #444; }"
+"h1 { font-size: 1.5rem; margin-bottom: 5px; color: #444; }"
+".header-info { background: #e9ecef; padding: 10px; border-radius: 5px; margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center; font-weight: bold; font-family: monospace; font-size: 1.1rem; }"
 "h2 { font-size: 1.2rem; margin-top: 20px; border-bottom: 2px solid #ddd; padding-bottom: 5px; }"
 "p { margin: 5px 0; font-size: 0.95rem; line-height: 1.4; }"
 ".card { background: white; padding: 15px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); margin-bottom: 15px; }"
@@ -34,6 +34,7 @@ const char* COMMON_CSS =
 ".btn-green { background-color: #28a745; width: 48%; }"
 ".btn-red { background-color: #dc3545; width: 48%; }"
 ".btn-blue { background-color: #007bff; width: 100%; margin-top: 10px; }"
+".btn-orange { background-color: #fd7e14; width: 100%; margin-top: 5px; }"
 ".btn-gray { background-color: #6c757d; font-size: 14px; padding: 8px 12px; }"
 "input[type=number], input[type=text] { padding: 10px; font-size: 16px; border: 1px solid #ccc; border-radius: 4px; width: 60px; text-align: center; margin: 2px; }"
 "input[type=checkbox] { transform: scale(1.5); margin: 5px; }"
@@ -102,62 +103,30 @@ static void handleDiag() {
     html += COMMON_CSS; 
     html += F("</head><body><h1>Deep Diagnostics</h1>");
 
-    // 1. SYSTEM
     html += F("<div class='card'><h2>System & Time</h2>");
     html += "FW Version: <span class='val'>" + String(FW_VERSION) + "</span><br>";
     html += "Local Time: <span class='val'>" + timeGetStr() + "</span>";
     html += timeIsValid() ? " <b style='color:green'>(NTP OK)</b><br>" : " <b style='color:red'>(NOT SYNCED)</b><br>";
+    html += "Irrigation Mode: <span class='val'>" + String(irrigationGetMode()==IrrigationMode::AUTO ? "AUTO" : "MANUAL") + "</span><br>";
     html += "Uptime: <span class='val'>" + String(millis()/1000) + " s</span><br>";
     html += "Free Heap: <span class='val'>" + String(ESP.getFreeHeap()) + " bytes</span><br>";
     html += "Last Diag Msg: <b>" + logGetLastDiag() + "</b>";
     html += F("</div>");
 
-    // 2. TECH (Valve/Flow/Battery)
-    unsigned long used = valveGetDailyOpenSec();
-    unsigned long limit = settingsGetDailyLimitSec();
-    
-    html += F("<div class='card'><h2>Valve / Flow / Power</h2>");
-    html += "Valve State: <b>" + String(valveGetState()==ValveState::OPEN?"OPEN":"CLOSED") + "</b><br>";
-    html += "Daily Usage: <span class='val'>" + String(used) + " s</span> (Limit: " + String(limit) + " s)<br><hr>";
-    
-    // Flow Section
-    html += "Flow Rate: <span class='val'>" + String(flowGetLpm(), 2) + " L/min</span><br>";
-    html += "Total Volume: <span class='val'>" + String(flowGetTotalLiters(), 2) + " L</span><br>";
-    
-    String pulseAgeStr;
-    if (flowGetLpm() < 0.01) {
-        pulseAgeStr = "n/a (Idle)";
-    } else {
-        pulseAgeStr = String(flowGetLastPulseAgeMs()) + " ms";
-    }
-    html += "Last Pulse Age: <span class='val'>" + pulseAgeStr + "</span><br><hr>";
-    
-    // Battery
-    html += "VBat (Calc): <span class='val'>" + String(batteryGetVoltage(), 2) + " V</span><br>";
-    html += "VBat (Raw ADC): <span class='val'>" + String(batteryGetRawValue(), 3) + " V</span><br>";
-    html += "Factor: <span class='val'>" + String(settingsGetBatFactor(), 2) + "</span><br>";
-    html += F("</div>");
-
-    // 3. MQTT
     html += F("<div class='card'><h2>MQTT Internals</h2>");
     html += "Connected: ";
     html += mqttIsConnected() ? "<b style='color:green'>YES</b><br>" : "<b style='color:red'>NO</b><br>";
     html += "State Code: <span class='val'>" + mqttGetStateString() + "</span><br>";
     html += "Last Error: <span class='val'>" + mqttGetLastError() + "</span><br>";
     html += "Outbound Queue: <span class='val'>" + String(mqttGetQueueSize()) + " items</span><br>";
-    
     unsigned long recAge = mqttGetLastReconnectMs();
     String recStr = (recAge == 0) ? "Never" : (String(recAge/1000) + " s ago");
     html += "Last Attempt: <span class='val'>" + recStr + "</span>";
-    
     html += F("</div>");
 
-    // 4. LOGS
-    html += F("<div class='card'><h2>Flow Log (50)</h2><table style='font-size:12px;color:#004488;'>");
+    html += F("<div class='card'><h2>Logs</h2><table style='font-size:12px;color:#004488;'>");
     html += logGetFlowEventsHtml(); 
-    html += F("</table></div>");
-
-    html += F("<div class='card'><h2>System Events (20)</h2><table style='font-size:12px;'>");
+    html += F("</table><br><table style='font-size:12px;'>");
     html += logGetEventsHtml(); 
     html += F("</table></div>");
     
@@ -186,7 +155,6 @@ static String buildStatusJson() {
     json += "\"last_diag\":\"" + logGetLastDiag() + "\",";
     json += "\"daily_limit_sec\":" + String(settingsGetDailyLimitSec()) + ",";
     json += "\"daily_usage_sec\":" + String(valveGetDailyOpenSec()) + ",";
-    json += "\"reboot_hour\":" + String(settingsGetRebootHour()) + ",";
     json += "\"irr_mode\":\"" + String(irrigationGetMode() == IrrigationMode::AUTO ? "AUTO" : "MANUAL") + "\",";
     json += "\"irr_running\":" + String(irrigationIsRunning() ? "true" : "false") + ",";
     IrrigationSlot slots[MAX_PROGRAM_SLOTS];
@@ -206,6 +174,10 @@ static void handleRoot() {
     String html = "<html><head><title>" DEVICE_NAME "</title><meta name='viewport' content='width=device-width, initial-scale=1'>" + String(COMMON_CSS) + "</head><body>";
     html += "<h1>" DEVICE_NAME " (" FW_VERSION ")</h1>";
     
+    // === NEU: HEADER MIT ZEIT UND MODE ===
+    String modeStr = (irrigationGetMode() == IrrigationMode::AUTO) ? "<span style='color:green'>AUTO</span>" : "<span style='color:orange'>MANUAL</span>";
+    html += "<div class='header-info'><span>" + timeGetStr() + "</span><span>" + modeStr + "</span></div>";
+
     html += "<div class='card'><h2>Status</h2>";
     html += "<p>IP: <b>" + wifiGetIp() + "</b> | RSSI: " + String(wifiGetRssi()) + " dBm</p>";
     String vColor = (valveGetState() == ValveState::OPEN ? "green" : "black");
@@ -213,7 +185,6 @@ static void handleRoot() {
     html += "<p>Flow: <b>" + String(flowGetLpm(), 2) + " L/min</b> | Total: " + String(flowGetTotalLiters(), 1) + " L</p>";
     html += "<p>Battery: <b>" + String(batteryGetVoltage(), 2) + " V</b></p>";
     
-    // === FIX: ALARM ANZEIGE (Alles was nicht OK ist -> Rot) ===
     String diag = logGetLastDiag();
     if (diag != "OK") { 
         html += "<div style='background:#fdd; padding:10px; border-left:5px solid red; margin:10px 0;'>";
@@ -222,11 +193,16 @@ static void handleRoot() {
     } else {
         html += "<p style='color:green;'>" + diag + "</p>";
     }
-    // ==========================================================
-
     html += "</div>";
 
-    html += "<div class='card'><h2>Manual Control</h2><form method='POST' action='/valve'>";
+    html += "<div class='card'><h2>Manual Control</h2>";
+    
+    // === NEU: BUTTON UM MODE AUF AUTO ZU SETZEN ===
+    if (irrigationGetMode() == IrrigationMode::MANUAL) {
+        html += "<form method='POST' action='/set_auto'><input type='submit' class='btn btn-orange' value='&#8635; Reset to AUTO Mode'></form>";
+    }
+    
+    html += "<form method='POST' action='/valve'>";
     html += "<button name='state' value='open' class='btn btn-green'>OPEN</button> <button name='state' value='close' class='btn btn-red'>CLOSE</button></form></div>";
     
     html += "<a href='/schedule' class='btn btn-blue' style='padding:15px 0; font-size:18px;'>&#128197; Configure Schedule</a>";
@@ -249,6 +225,8 @@ static void handleRoot() {
     server.send(200, "text/html", html);
 }
 
+// ... (Restliche Handler bleiben gleich)
+
 static void handleScheduleGet() {
     if (!checkAuth()) return;
     addNoCacheHeaders();
@@ -256,6 +234,10 @@ static void handleScheduleGet() {
     irrigationGetSlots(slots);
     String html = "<html><head><title>Schedule</title><meta name='viewport' content='width=device-width, initial-scale=1'>" + String(COMMON_CSS) + "</head><body>";
     html += "<h1><a href='/' style='text-decoration:none; color:#333;'>&#8592;</a> Irrigation Schedule</h1>";
+    // Header Info auch hier
+    String modeStr = (irrigationGetMode() == IrrigationMode::AUTO) ? "<span style='color:green'>AUTO</span>" : "<span style='color:orange'>MANUAL</span>";
+    html += "<div class='header-info'><span>" + timeGetStr() + "</span><span>" + modeStr + "</span></div>";
+
     html += "<form method='POST' action='/schedule_save'><div class='card' style='overflow-x:auto;'><table><tr><th>#</th><th>En</th><th>Time</th><th>Dur(s)</th><th>Days</th></tr>";
     for(int i=0; i<MAX_PROGRAM_SLOTS; i++) {
         String base = String(i);
@@ -278,6 +260,8 @@ static void handleScheduleGet() {
     html += "</body></html>";
     server.send(200, "text/html", html);
 }
+
+// ... (Rest wie vorher)
 
 static void handleSchedulePost() {
     if (!checkAuth()) return;
@@ -360,6 +344,15 @@ static void handleValvePost() {
     server.send(302, "text/plain", "Redirecting");
 }
 
+// === NEU: SET AUTO HANDLER ===
+static void handleSetAutoPost() {
+    if (!checkAuth()) return;
+    irrigationSetMode(IrrigationMode::AUTO);
+    logInfo("Manual Override: Reset to AUTO Mode");
+    server.sendHeader("Location", "/", true);
+    server.send(302, "text/plain", "Redirecting");
+}
+
 static void handleApiStatus() {
     if (!checkAuth()) return;
     addNoCacheHeaders();
@@ -400,6 +393,7 @@ void webInit() {
     server.on("/schedule",   HTTP_GET,  handleScheduleGet);
     server.on("/schedule_save", HTTP_POST, handleSchedulePost);
     server.on("/valve",      HTTP_POST, handleValvePost);
+    server.on("/set_auto",   HTTP_POST, handleSetAutoPost); // NEU
     server.on("/settings",   HTTP_POST, handleSettingsPost);
     server.on("/mqtt_config",HTTP_GET,  handleMqttConfig);
     server.on("/mqtt_settings", HTTP_POST, handleMqttSettingsPost);

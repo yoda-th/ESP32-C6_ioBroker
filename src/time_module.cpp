@@ -11,12 +11,12 @@ void timeInit() {
     // NTP_TZ_OFFSET_S ist in config.h definiert (7 * 3600 für Thailand)
     configTime(NTP_TZ_OFFSET_S, 0, NTP_SERVER_1);
     
-    // FIX FÜR RICHTIGE LOG-ZEITEN (POSIX):
-    // "UTC-07:00" bedeutet: Lokalzeit ist UTC + 7h.
-    setenv("TZ", "UTC-07:00", 1); 
+    // FIX: Korrekter POSIX-String für Thailand (Indochina Time, UTC+7)
+    // In POSIX bedeutet 'ICT-7', dass man 7h abziehen muss, um auf UTC zu kommen.
+    setenv("TZ", "ICT-7", 1); 
     tzset();
 
-    logInfo("Time Client init (Target: UTC+7)");
+    logInfo("Time Client init (Target: UTC+7 / ICT-7)");
 }
 
 void timeLoop() {
@@ -54,22 +54,18 @@ String timeGetStr() {
     return String(buf);
 }
 
-// === KOMPATIBILITÄTS-FUNKTIONEN (Fix für Linker Errors) ===
+// === KOMPATIBILITÄTS-FUNKTIONEN ===
 
-// Wird vom Irrigation Module gebraucht
 bool timeIsValid() {
     return timeSynced;
 }
 
-// Wird vom Irrigation Module gebraucht, um struct tm zu holen
 void timeGetLocal(struct tm &out) {
     time_t now;
     time(&now);
     localtime_r(&now, &out);
 }
 
-// Wird vom Watchdog Module gesucht (Legacy)
-// Wir geben hier FALSE zurück, da der Reboot jetzt zentral von main.cpp gesteuert wird.
 bool timeIsDailyResetTime() {
     return false; 
 }
